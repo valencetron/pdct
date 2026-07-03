@@ -78,9 +78,13 @@ else
   echo "✅ config exists: $ENVFILE"
 fi
 
-# 4. Self-diagnosis (bundled example corpus — no personal setup needed)
+# 4. Validate the configured home is real and writable
+touch "$PDCT_HOME_DIR/.install-probe" 2>/dev/null && rm "$PDCT_HOME_DIR/.install-probe" || {
+  echo "❌ PDCT_HOME not writable: $PDCT_HOME_DIR"; exit 1; }
+
+# 5. Self-diagnosis (bundled example corpus — no personal setup needed)
 echo "━━ running doctor"
-python -m dct.doctor || {
+PDCT_HOME="$PDCT_HOME_DIR" python -m dct.doctor || {
   echo "❌ doctor failed — see failures above"; exit 1; }
 
 echo

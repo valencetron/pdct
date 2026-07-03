@@ -28,9 +28,14 @@ from pathlib import Path
 from dct.event_log import EventLog
 
 
-EVENTS_JSONL = Path.home() / "example-stack" / "dynamic-context-traversal" / "events.jsonl"
-VAULT_ROOT = Path.home() / "example-stack" / "vault"
-TRANSCRIPTS_GLOB = str(Path.home() / "example-stack" / "tools" / "transcripts" / "*.json")
+from dct import config as _cfg
+
+EVENTS_JSONL = _cfg.events_path()
+VAULT_ROOT = _cfg.vault_roots()[0].parent if _cfg.vault_roots() else _cfg.pdct_home() / "vault"
+import os as _os
+TRANSCRIPTS_GLOB = _os.environ.get(
+    "PDCT_TRANSCRIPTS_GLOB",
+    str(Path.home() / "example-stack" / "tools" / "transcripts" / "*.json"))
 
 
 def _emit(msg: str, *, quiet: bool) -> None:

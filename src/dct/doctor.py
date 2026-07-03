@@ -161,22 +161,25 @@ def _check_retrieval_quality(corpus: Path) -> list[Check]:
     _old_events, _old_root = _svc.EVENTS_JSONL, _svc.DISTILL_ROOT
     _svc.EVENTS_JSONL = corpus / "events.jsonl"
     _svc.DISTILL_ROOT = roots[0]
-    passed = 0
-    for q in questions:
-        try:
-            rows = _aggregate([_cascade_for_seed(q["question"])], idx,
-                              query_text=q["question"])
-            top_ids = [r.id for r in rows[:5]]
-            hit = q["expected_id"] in top_ids
-        except Exception as e:  # noqa: BLE001
-            checks.append(Check(f"q:{q['id']}", False, f"{type(e).__name__}: {e}"))
-            continue
-        passed += hit
-        checks.append(Check(f"q:{q['id']}", hit,
-                            f"expected {q['expected_id']} in top5={top_ids}"))
-    checks.append(Check("retrieval recall", passed == len(questions),
-                        f"{passed}/{len(questions)} canned questions hit top-5"))
-    _svc.EVENTS_JSONL, _svc.DISTILL_ROOT = _old_events, _old_root
+    try:
+        passed = 0
+        for q in questions:
+            try:
+                rows = _aggregate([_cascade_for_seed(q["question"])], idx,
+                                  query_text=q["question"])
+                top_ids = [r.id for r in rows[:5]]
+                hit = q["expected_id"] in top_ids
+            except Exception as e:  # noqa: BLE001
+                checks.append(Check(f"q:{q.get('id', '?')}", False,
+                                    f"{type(e).__name__}: {e}"))
+                continue
+            passed += hit
+            checks.append(Check(f"q:{q['id']}", hit,
+                                f"expected {q['expected_id']} in top5={top_ids}"))
+        checks.append(Check("retrieval recall", passed == len(questions),
+                            f"{passed}/{len(questions)} canned questions hit top-5"))
+    finally:
+        _svc.EVENTS_JSONL, _svc.DISTILL_ROOT = _old_events, _old_root
     return checks
 
 
