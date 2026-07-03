@@ -1,0 +1,5 @@
+{"type":"system","parentUuid":null,"sessionId":"cccc-3333","isSidechain":false,"timestamp":"2026-04-18T12:00:00.000Z","content":"session started"}
+{"type":"user","parentUuid":null,"sessionId":"cccc-3333","isSidechain":false,"timestamp":"2026-04-18T12:00:01.000Z","message":{"role":"user","content":"real user turn about [[alpha]]"}}
+{"type":"user","parentUuid":"p1","sessionId":"cccc-3333","isSidechain":true,"timestamp":"2026-04-18T12:00:02.000Z","message":{"role":"user","content":"sidechain noise about [[beta]]"}}
+{"type":"custom-title","parentUuid":null,"sessionId":"cccc-3333","isSidechain":false,"timestamp":"2026-04-18T12:00:03.000Z","title":"Some title"}
+{"type":"assistant","parentUuid":"p1","sessionId":"cccc-3333","isSidechain":false,"timestamp":"2026-04-18T12:00:04.000Z","message":{"role":"assistant","content":"response with #gamma"}}

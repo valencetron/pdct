@@ -1,0 +1,3 @@
+{"type":"user","parentUuid":null,"sessionId":"eeee-5555","isSidechain":false,"timestamp":"2026-04-18T14:00:00.000Z","message":{"role":"user","content":"has ts [[epsilon]]"}}
+{"type":"user","parentUuid":"p1","sessionId":"eeee-5555","isSidechain":false,"message":{"role":"user","content":"no ts [[zeta]]"}}
+{"type":"user","parentUuid":"p2","sessionId":"eeee-5555","isSidechain":false,"timestamp":"not-a-date","message":{"role":"user","content":"bad ts [[eta]]"}}

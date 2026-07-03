@@ -1,0 +1,32 @@
+{"ts": 1783070181.83358, "op": "read", "concepts": ["vector-database-selection", "embedding-storage", "pgvector", "retrieval-infrastructure"], "source": "vault", "metadata": {"role": "user"}}
+{"ts": 1783070481.83358, "op": "read", "concepts": ["sourdough-baking", "hydration-ratio", "kitchen-experiments", "fermentation-timing"], "source": "vault", "metadata": {"role": "user"}}
+{"ts": 1783070781.83358, "op": "read", "concepts": ["marathon-training", "running-schedule", "injury-prevention", "long-run-progression"], "source": "vault", "metadata": {"role": "user"}}
+{"ts": 1783071081.83358, "op": "read", "concepts": ["rate-limit-incident", "exponential-backoff", "api-reliability", "incident-postmortem"], "source": "vault", "metadata": {"role": "user"}}
+{"ts": 1783071381.83358, "op": "read", "concepts": ["vegetable-garden", "planting-schedule", "raised-beds", "tomato-varieties"], "source": "vault", "metadata": {"role": "user"}}
+{"ts": 1783071681.83358, "op": "read", "concepts": ["reading-group", "distributed-systems", "raft-consensus", "paper-discussion"], "source": "vault", "metadata": {"role": "user"}}
+{"ts": 1783072181.83358, "op": "read", "concepts": ["retrieval-infrastructure", "api-reliability"], "source": "vault", "metadata": {}}
+{"ts": 1783072281.83358, "op": "read", "concepts": ["kitchen-experiments", "vegetable-garden"], "source": "vault", "metadata": {}}
+{"ts":1783072072.0887191,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072072.6555011,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072072.772195,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072161.749664,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072161.754498,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072161.755529,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072325.082735,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072325.085332,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072325.086016,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072340.765731,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072340.768237,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072340.768925,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072358.763443,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072358.766104,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072358.766811,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072386.301588,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072386.3042078,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783072386.304949,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783096079.875902,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783096079.8784719,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783096079.879197,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783096110.61654,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783096110.619178,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}
+{"ts":1783096110.6198988,"source":"service","op":"rebuild","concepts":[],"metadata":{"nodes":24,"edges":38,"topic_id":null}}

@@ -1,0 +1,6 @@
+{"type":"user","isSidechain":false,"timestamp":"2026-04-19T10:00:00Z","message":{"role":"user","content":"working on the [[voice-retell]] integration"}}
+{"type":"assistant","isSidechain":false,"timestamp":"2026-04-19T10:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"reading the daemon"},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"~/example-stack/tools/telegram-dispatch/daemon.py"}}]}}
+{"type":"assistant","isSidechain":false,"timestamp":"2026-04-19T10:00:10Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"mcp__claude_ai_Airship_Local__mc_card_update","input":{"slug":"voice-onboarding","tags":"voice, retell","status":"Done"}}]}}
+{"type":"assistant","isSidechain":false,"timestamp":"2026-04-19T10:00:15Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"Skill","input":{"skill":"brainstorming"}}]}}
+{"type":"assistant","isSidechain":false,"timestamp":"2026-04-19T10:00:20Z","message":{"role":"assistant","content":[{"type":"text","text":"irrelevant"},{"type":"tool_use","id":"t4","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"assistant","isSidechain":true,"timestamp":"2026-04-19T10:00:25Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t5","name":"Read","input":{"file_path":"~/should-be-filtered.py"}}]}}

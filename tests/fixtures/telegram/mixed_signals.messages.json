@@ -1,0 +1,6 @@
+[
+  {"role": "user", "content": "starting with [[Alpha]] and #beta"},
+  {"role": "assistant", "content": "referencing Orion Aperture/a/Gamma.md here"},
+  {"role": "user", "content": "   "},
+  {"role": "assistant", "content": "[[Alpha]] again (should emit, different turn)"}
+]

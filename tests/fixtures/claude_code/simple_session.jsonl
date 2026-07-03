@@ -1,0 +1,3 @@
+{"type":"user","parentUuid":null,"sessionId":"aaaa-1111","isSidechain":false,"timestamp":"2026-04-18T10:00:00.000Z","message":{"role":"user","content":"working on [[Context-Driven Traversal]] today"}}
+{"type":"assistant","parentUuid":"p1","sessionId":"aaaa-1111","isSidechain":false,"timestamp":"2026-04-18T10:00:05.000Z","message":{"role":"assistant","content":"See Orion Aperture/distillations/2026-04-18 Foo.md for context"}}
+{"type":"user","parentUuid":"p2","sessionId":"aaaa-1111","isSidechain":false,"timestamp":"2026-04-18T10:01:00.000Z","message":{"role":"user","content":""}}

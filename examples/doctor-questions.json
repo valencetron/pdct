@@ -1,0 +1,17 @@
+[
+  {
+    "id": "vector-db",
+    "question": "which vector database did we pick and why",
+    "expected_id": "2026-01-05-choosing-a-vector-db"
+  },
+  {
+    "id": "sourdough",
+    "question": "what sourdough hydration ratio worked best",
+    "expected_id": "2026-01-12-sourdough-hydration-experiments"
+  },
+  {
+    "id": "rate-limit",
+    "question": "how did we fix the API rate limit incident backoff",
+    "expected_id": "2026-02-20-api-rate-limit-incident"
+  }
+]
