@@ -36,13 +36,27 @@ def _split_frontmatter(raw: str) -> tuple[dict, str]:
     return parsed, body
 
 
-def is_ignored_path(path: Path) -> bool:
+def is_ignored_path(path: Path, *, root: Path | None = None) -> bool:
     """Return True for paths the vault adapter should skip.
 
     Ignores any path containing a segment starting with '.' — covers
     .obsidian/, .trash/, .DS_Store, .git/, etc.
+
+    When ``root`` is given and ``path`` is inside it, only the segments
+    BELOW the root are checked. This matters because the default
+    PDCT_HOME is ``~/.pdct`` — the watch root itself contains a dotted
+    segment, and filtering on the full path would silently ignore every
+    note in a default install (found live on the VPS, 2026-07-04).
     """
-    for part in Path(path).parts:
+    p = Path(path)
+    if root is not None:
+        try:
+            parts = p.resolve().relative_to(Path(root).resolve()).parts
+        except (ValueError, OSError):
+            parts = p.parts
+    else:
+        parts = p.parts
+    for part in parts:
         if part.startswith("."):
             return True
     return False

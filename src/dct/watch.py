@@ -26,16 +26,20 @@ from dct.events import Event, EventOp, EventSource
 
 
 class VaultEventHandler:
-    def __init__(self, *, log: EventLog, debounce_secs: float = 0.5) -> None:
+    def __init__(self, *, log: EventLog, debounce_secs: float = 0.5,
+                 vault_root: Path | None = None) -> None:
         self._log = log
         self._debounce = float(debounce_secs)
         self._last_fired: dict[str, float] = {}
+        # Watch root — dot-filtering applies only BELOW this (the default
+        # PDCT_HOME is ~/.pdct, a dotted path itself).
+        self._root = Path(vault_root) if vault_root else None
 
     def handle_path(self, path: Path, *, fs_event: str) -> None:
         p = Path(path)
         if p.suffix != ".md":
             return
-        if is_ignored_path(p):
+        if is_ignored_path(p, root=self._root):
             return
 
         key = str(p.resolve())
@@ -126,7 +130,8 @@ def run_watcher_until(
     deadline_secs: float = 0.0,
     until: Callable[[], bool] | None = None,
 ) -> None:
-    handler = VaultEventHandler(log=log, debounce_secs=debounce_secs)
+    handler = VaultEventHandler(log=log, debounce_secs=debounce_secs,
+                                vault_root=vault_root)
     observer = Observer()
     observer.schedule(_WatchdogBridge(handler), str(vault_root), recursive=True)
     observer.start()
