@@ -21,29 +21,37 @@ LAUNCHD_LABEL = "com.pdct.supervisor"
 SYSTEMD_UNIT = "pdct-supervisor.service"
 
 
+_SERVICE_ENV_KEYS = ("PDCT_HOME", "PDCT_VAULT_ROOT", "OBSIDIAN_VAULT",
+                     "PDCT_EVENTS_PATH", "PDCT_LLM_PROVIDER",
+                     "PDCT_LLM_BASE_URL", "PDCT_LLM_MODEL", "PDCT_LLM_API_KEY")
+
+
+def _service_env() -> dict[str, str]:
+    env = {k: v for k in _SERVICE_ENV_KEYS
+           if (v := os.environ.get(k)) and "\n" not in v}
+    env.setdefault("PDCT_HOME", str(_cfg.pdct_home()))
+    return env
+
+
 def _launchd_plist() -> str:
-    home = _cfg.pdct_home()
-    log = _cfg.logs_dir() / "supervisor.log"
-    env_lines = ""
-    for k in ("PDCT_HOME", "PDCT_VAULT_ROOT", "OBSIDIAN_VAULT",
-              "PDCT_EVENTS_PATH", "PDCT_LLM_PROVIDER", "PDCT_LLM_BASE_URL",
-              "PDCT_LLM_MODEL", "PDCT_LLM_API_KEY"):
-        v = os.environ.get(k)
-        if v:
-            env_lines += (f"        <key>{k}</key>\n"
-                          f"        <string>{v}</string>\n")
-    if "PDCT_HOME" not in env_lines:
-        env_lines = (f"        <key>PDCT_HOME</key>\n"
-                     f"        <string>{home}</string>\n") + env_lines
+    """Hand-serialized plist with strict XML escaping (xml.sax.saxutils —
+    pure Python, no pyexpat: broken on some Homebrew builds). Values with
+    &, <, quotes, etc. can't corrupt the file."""
+    from xml.sax.saxutils import escape
+    log = escape(str(_cfg.logs_dir() / "supervisor.log"))
+    env_lines = "".join(
+        f"        <key>{escape(k)}</key>\n"
+        f"        <string>{escape(v)}</string>\n"
+        for k, v in _service_env().items())
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key><string>{LAUNCHD_LABEL}</string>
+    <key>Label</key><string>{escape(LAUNCHD_LABEL)}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{sys.executable}</string>
+        <string>{escape(sys.executable)}</string>
         <string>-m</string>
         <string>dct.supervisor</string>
     </array>
@@ -60,17 +68,15 @@ def _launchd_plist() -> str:
 """
 
 
+def _systemd_escape(v: str) -> str:
+    """Escape a value for a systemd Environment="K=V" directive."""
+    return v.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _systemd_unit() -> str:
-    home = _cfg.pdct_home()
-    env_lines = ""
-    for k in ("PDCT_HOME", "PDCT_VAULT_ROOT", "OBSIDIAN_VAULT",
-              "PDCT_EVENTS_PATH", "PDCT_LLM_PROVIDER", "PDCT_LLM_BASE_URL",
-              "PDCT_LLM_MODEL", "PDCT_LLM_API_KEY"):
-        v = os.environ.get(k)
-        if v:
-            env_lines += f'Environment="{k}={v}"\n'
-    if "PDCT_HOME=" not in env_lines:
-        env_lines = f'Environment="PDCT_HOME={home}"\n' + env_lines
+    env_lines = "".join(
+        f'Environment="{k}={_systemd_escape(v)}"\n'
+        for k, v in _service_env().items())
     return f"""[Unit]
 Description=PDCT supervisor (vault watcher + scheduler)
 After=default.target

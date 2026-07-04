@@ -122,6 +122,49 @@ def provider_available() -> tuple[bool, str]:
     return False, f"unknown PDCT_LLM_PROVIDER={p!r}"
 
 
+def probe_endpoint(timeout: float = 5.0) -> tuple[bool, str]:
+    """Actually reach the configured endpoint and validate auth.
+
+    Distinguishes connectivity/auth failures from model-capability failures
+    (doctor contract: llm.endpoint = "reachable + auth valid").
+    """
+    p = provider_name()
+    usable, detail = provider_available()
+    if not usable:
+        return False, detail
+    if p == "anthropic":
+        try:
+            _anthropic_request({
+                "model": "claude-haiku-4-5", "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}],
+            }, timeout=timeout)
+            return True, "anthropic API reachable, auth valid"
+        except ProviderError as e:
+            msg = str(e)
+            # 400s mean we reached the API and auth passed (bad request
+            # shape is fine for a probe); 401/403 = auth failure.
+            if "HTTP 400" in msg:
+                return True, "anthropic API reachable, auth valid"
+            return False, msg[:200]
+    # openai-compatible: hit /models (universally supported, cheap)
+    base = os.environ.get("PDCT_LLM_BASE_URL", "").rstrip("/")
+    headers = {}
+    key = os.environ.get("PDCT_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    req = urllib.request.Request(f"{base}/models", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout):
+            return True, f"{base} reachable, auth accepted"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return False, f"auth rejected by {base} (HTTP {e.code})"
+        # Some servers don't implement /models — reachable is enough.
+        return True, f"{base} reachable (HTTP {e.code} on /models probe)"
+    except (urllib.error.URLError, OSError) as e:
+        return False, f"endpoint unreachable: {base} — {e}"
+
+
 # ── anthropic backend ───────────────────────────────────────────────────────
 
 def _anthropic_request(payload: dict, timeout: float = 60.0) -> dict:

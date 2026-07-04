@@ -110,8 +110,19 @@ def invoke_judge(prompt: str) -> JudgeInvocationResult:
     t0 = time.monotonic()
     try:
         from dct import providers as _prov
-        if _prov.provider_name() != "anthropic":
+        try:
+            import anthropic as _sdk  # noqa: F401
+            _sdk_present = True
+        except ImportError:
+            _sdk_present = False
+        # Non-anthropic providers OR anthropic-without-SDK (optional extra
+        # on public installs) both use the urllib provider layer — the same
+        # path the doctor validates.
+        if _prov.provider_name() != "anthropic" or not _sdk_present:
             raw_text = _prov.complete_text(JUDGE_SYSTEM_PROMPT, prompt,
+                                           model=_JUDGE_MODEL if
+                                           _prov.provider_name() == "anthropic"
+                                           else None,
                                            max_tokens=256)
 
             class _Block:  # minimal shim matching resp.content[0].text below

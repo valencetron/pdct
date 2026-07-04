@@ -339,3 +339,60 @@ def test_integration_doc_matches_doctor_check_ids():
     text = doc.read_text()
     missing = [cid for cid in CHECK_IDS if f"`{cid}`" not in text]
     assert not missing, f"INTEGRATION.md missing check IDs: {missing}"
+
+
+# ── anthropic default WITHOUT the SDK (optional extra on public installs) ──
+
+def test_distiller_routes_via_providers_when_sdk_missing(monkeypatch):
+    """Codex P1: default provider=anthropic with no `anthropic` package must
+    route through the urllib provider layer (the path doctor validates),
+    not crash with ModuleNotFoundError."""
+    import builtins
+    import dct.llm as llm
+    from dct import providers as prov
+
+    real_import = builtins.__import__
+
+    def _no_sdk(name, *a, **kw):
+        if name == "anthropic":
+            raise ImportError("No module named 'anthropic'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", _no_sdk)
+    monkeypatch.setenv("PDCT_LLM_PROVIDER", "anthropic")
+
+    captured = {}
+
+    def _fake_complete_json(system, user, schema, *, model=None, max_tokens=2048):
+        captured["model"] = model
+        return {"title": "t", "summary": "s",
+                "concepts": ["alpha-beta"], "key_quotes": []}
+
+    monkeypatch.setattr(prov, "complete_json", _fake_complete_json)
+    note = llm.call_distiller(
+        [{"role": "user", "text": "hello"}], {"session_id": "x"}, [])
+    assert note.title == "t"
+    assert captured["model"]  # resolved model id was passed through
+
+
+def test_judge_routes_via_providers_when_sdk_missing(monkeypatch):
+    import builtins
+    from dct import providers as prov
+    from dct.judge import invoker
+
+    real_import = builtins.__import__
+
+    def _no_sdk(name, *a, **kw):
+        if name == "anthropic":
+            raise ImportError("No module named 'anthropic'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", _no_sdk)
+    monkeypatch.setenv("PDCT_LLM_PROVIDER", "anthropic")
+    monkeypatch.setattr(
+        prov, "complete_text",
+        lambda *a, **kw: '{"score": 4, "rationale": "ok", '
+                         '"era_assessment": "helpful"}')
+    r = invoker.invoke_judge("test prompt")
+    assert r.status not in ("unexpected_error",), r.fail_reason
+    assert r.score == 4

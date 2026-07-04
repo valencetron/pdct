@@ -212,6 +212,40 @@ class Supervisor:
 def start_daemon() -> tuple[bool, str]:
     if (pid := read_pid()) is not None:
         return False, f"already running (pid {pid})"
+    # Atomic start lock (O_CREAT|O_EXCL) — two concurrent `pdct daemon start`
+    # calls must not both pass the pidfile check and spawn two supervisors.
+    _cfg.runtime_dir().mkdir(parents=True, exist_ok=True)
+    lock = _cfg.runtime_dir() / "supervisor.start-lock"
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        os.close(fd)
+    except FileExistsError:
+        # Stale lock (crashed starter) is reclaimable after 30s.
+        try:
+            age = time.time() - lock.stat().st_mtime
+        except OSError:
+            age = 0.0
+        if age < 30:
+            return False, "another start is in progress"
+        try:
+            lock.unlink()
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except (OSError, FileExistsError):
+            return False, "another start is in progress"
+    try:
+        return _start_daemon_locked()
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
+def _start_daemon_locked() -> tuple[bool, str]:
+    if (pid := read_pid()) is not None:  # re-check under the lock
+        return False, f"already running (pid {pid})"
     _cfg.logs_dir().mkdir(parents=True, exist_ok=True)
     logf = open(log_path(), "a")  # noqa: SIM115 — handed to child
     env = dict(os.environ)

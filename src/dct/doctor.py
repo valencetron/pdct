@@ -109,12 +109,14 @@ def _check_configuration(live: bool) -> list[Check]:
             checks.append(Check("runtime dir writable", True, str(cfg.runtime_dir()), id="config.runtime"))
         except OSError as e:
             checks.append(Check("runtime dir writable", False, str(e), id="config.runtime"))
-    has_key = bool(os.environ.get("ANTHROPIC_API_KEY")) or \
-        Path("~/.claude/.credentials.json").expanduser().exists()
-    checks.append(Check("anthropic credentials", has_key,
-                        "found" if has_key else
-                        "no ANTHROPIC_API_KEY / claude credentials — distiller & judge "
-                        "disabled; retrieval works without them", required=False,
+    # Provider-aware (contract: "any provider auth detected") — an
+    # openai-compatible install with BASE_URL+MODEL counts as credentialed.
+    from dct import providers as _prov
+    has_auth, detail = _prov.provider_available()
+    checks.append(Check("llm credentials", has_auth,
+                        detail if has_auth else
+                        f"{detail} — distiller & judge disabled; retrieval "
+                        "works without them", required=False,
                         id="config.credentials"))
     return checks
 
@@ -236,8 +238,22 @@ def _check_llm() -> list[Check]:
         return [Check("llm provider", False,
                       f"{detail} — distillation disabled, retrieval-only "
                       "mode available", required=False, id="llm.endpoint")]
-    checks.append(Check(f"provider:{prov.provider_name()}", True, detail,
-                        id="llm.endpoint"))
+    # Contract: llm.endpoint = "reachable + auth valid" — actually probe it
+    # so connectivity/auth failures aren't misreported as capability ones.
+    reach_ok, reach_detail = prov.probe_endpoint()
+    checks.append(Check(f"provider:{prov.provider_name()}", reach_ok,
+                        reach_detail, id="llm.endpoint"))
+    if not reach_ok:
+        checks.append(Check("structured output", False,
+                            "skipped — endpoint unreachable/auth invalid",
+                            id="llm.structured"))
+        checks.append(Check("concept extraction quality", False,
+                            "skipped — endpoint unreachable/auth invalid",
+                            id="llm.concepts"))
+        checks.append(Check("judge round-trip", False,
+                            "skipped — endpoint unreachable/auth invalid",
+                            id="llm.judge"))
+        return checks
 
     # (b) structured-output fidelity on a canned synthetic session
     schema = {

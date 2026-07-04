@@ -214,6 +214,19 @@ def call_distiller(
                                   _TOOL_SCHEMA["input_schema"])
         return _parse_tool_response(obj)
 
+    # anthropic provider WITHOUT the SDK installed (it's an optional extra
+    # on public installs) — route through the urllib provider layer, the
+    # same code path the doctor validates. SDK installs keep the original
+    # path below (refresh-on-401 + SDK retry semantics).
+    try:
+        import anthropic  # noqa: F401
+    except ImportError:
+        user_prompt = build_user_prompt(turns, session_meta, rules_concepts)
+        obj = _prov.complete_json(SYSTEM_PROMPT, user_prompt,
+                                  _TOOL_SCHEMA["input_schema"],
+                                  model=resolve_model_id(model))
+        return _parse_tool_response(obj)
+
     model_id = resolve_model_id(model)
     user_prompt = build_user_prompt(turns, session_meta, rules_concepts)
     auth_error_cls = _auth_error_cls()
