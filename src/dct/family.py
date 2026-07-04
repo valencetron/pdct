@@ -32,6 +32,15 @@ def valence_home() -> Path:
     return Path(os.environ.get("VALENCE_HOME", "~/.valence")).expanduser()
 
 
+def _display(p: Path) -> str:
+    """Home-relative path for doctor output — absolute user paths must not
+    leak into logs/support bundles (Codex b105 pdct #3)."""
+    try:
+        return "~/" + str(p.relative_to(Path.home()))
+    except ValueError:
+        return p.name or str(p)
+
+
 def sibling_checks(home: Path | None = None, *, check_cls):
     """Return 0 or 1 advisory Check objects describing the valence sibling.
 
@@ -43,8 +52,9 @@ def sibling_checks(home: Path | None = None, *, check_cls):
     status_path = home / "fleet-status.json"
     if not status_path.exists():
         return [check_cls("sibling:valence", True,
-                          f"install detected at {home} (no fleet-status.json"
-                          " — run `valence doctor --fleet` to populate)",
+                          f"install detected at {_display(home)} "
+                          "(no fleet-status.json — run `valence doctor "
+                          "--fleet` to populate)",
                           required=False, id="env.sibling")]
     try:
         data = json.loads(status_path.read_text())
