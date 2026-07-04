@@ -70,7 +70,15 @@ if [ ! -f "$ENVFILE" ]; then
 export PDCT_HOME="$PDCT_HOME_DIR"
 # Point at an existing Obsidian vault instead (optional):
 # export OBSIDIAN_VAULT="\$HOME/Documents/MyVault"
-# Anthropic API key (needed for distiller/judge; retrieval works without):
+# LLM provider (distiller/judge; retrieval works without any LLM).
+# anthropic (default): Claude Code OAuth login or ANTHROPIC_API_KEY.
+# openai-compatible: any /v1/chat/completions endpoint (OpenAI, Ollama,
+# LM Studio, OpenRouter, Groq, local models):
+# export PDCT_LLM_PROVIDER="openai-compatible"
+# export PDCT_LLM_BASE_URL="http://localhost:11434/v1"
+# export PDCT_LLM_MODEL="llama3.1:8b"
+# export PDCT_LLM_API_KEY=""
+# Anthropic API key (anthropic provider; retrieval works without):
 # export ANTHROPIC_API_KEY="sk-ant-..."
 ENVEOF
   echo "✅ config scaffold: $ENVFILE"
@@ -90,5 +98,8 @@ PDCT_HOME="$PDCT_HOME_DIR" python -m dct.doctor || {
 echo
 echo "━━ PDCT installed. Next steps:"
 echo "   source .venv/bin/activate && source $ENVFILE"
-echo "   python -m dct.doctor --live     # check YOUR setup (vault, events)"
-echo "   see INSTALL.md and CONFIGURATION.md"
+echo "   pdct init                       # detect your env, finish setup"
+echo "   pdct doctor --live              # check YOUR setup (vault, events)"
+echo "   pdct daemon start               # keep the write path alive"
+echo "   pdct recall \"a question\"       # query memory from the shell"
+echo "   see INSTALL.md, CONFIGURATION.md, INTEGRATION.md"

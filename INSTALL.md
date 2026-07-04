@@ -5,8 +5,11 @@
 - **Python 3.12+** (required)
 - macOS or Linux
 - ~500MB disk if you enable the embeddings extra (sentence-transformers model)
-- An **Anthropic API key** — only for the distiller and judge; the retrieval
-  core, doctor, and benchmark run without one
+- An **LLM** — only for the distiller and judge; the retrieval core, doctor,
+  and benchmark run without one. Any of: Claude Code login (subscription
+  OAuth — zero API key), `ANTHROPIC_API_KEY`, or **any OpenAI-compatible
+  endpoint** (OpenAI, OpenRouter, Groq, local Ollama/LM Studio) that meets
+  the minimum capability gate below
 
 ## Install
 
@@ -22,6 +25,17 @@ The installer:
 3. scaffolds `$PDCT_HOME` (`~/.pdct` by default) with `vault/ runtime/ logs/ data/`
    and writes `pdct.env` — a template you edit and `source`
 4. runs `python -m dct.doctor` against the bundled synthetic corpus
+
+After install, the `pdct` command is on your venv PATH:
+
+```bash
+pdct init            # detect your environment, finish setup interactively
+pdct doctor --live   # validate YOUR setup end-to-end
+pdct daemon start    # supervisor: vault watcher + scheduler (any POSIX OS)
+pdct daemon install-service   # optional: survive reboot (launchd/systemd)
+pdct recall "what did we decide about X?"   # query memory from any shell
+pdct ingest transcript.json                 # manual event ingestion
+```
 
 **A green doctor means PDCT works on your machine** before you've wired any
 of your own data.
@@ -45,6 +59,28 @@ pytest -q                      # full test suite
 - Run `python -m dct.doctor --live` after editing `pdct.env` — it validates
   your actual vault, events log, and writability.
 
+## LLM providers & minimum requirements
+
+Configure in `pdct.env`:
+
+```bash
+# Claude subscription or API key (default — auto-detected by pdct init)
+PDCT_LLM_PROVIDER=anthropic
+
+# …or any OpenAI-compatible endpoint, including local models:
+PDCT_LLM_PROVIDER=openai-compatible
+PDCT_LLM_BASE_URL=http://localhost:11434/v1   # Ollama example
+PDCT_LLM_MODEL=llama3.1:8b
+PDCT_LLM_API_KEY=                             # if the endpoint needs one
+```
+
+**Minimum capability gate** (verified functionally by `pdct doctor`, stage
+`llm`): the model must (a) return schema-valid JSON for a distillation,
+(b) extract topically-correct concepts, (c) return a valid judge verdict.
+Models that fail are reported as *below minimum capability* — distillation
+is disabled and PDCT runs in retrieval-only mode. No provider configured at
+all is also fine: retrieval, doctor, daemon, and benchmark all work.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -53,3 +89,8 @@ pytest -q                      # full test suite
 | `python>=3.12` fails | install via pyenv/brew/apt, re-run installer |
 | retrieval recall 0/3 | file an issue with `doctor --json` output |
 | `--live`: vault root missing | set `OBSIDIAN_VAULT` or `PDCT_VAULT_ROOT` in `pdct.env` |
+| `llm.structured` / `llm.concepts` fail | model below minimum capability — use a stronger model |
+| daemon won't start | `pdct daemon logs` shows the supervisor log tail |
+
+See **INTEGRATION.md** for the full component checklist mapped to doctor
+check IDs.

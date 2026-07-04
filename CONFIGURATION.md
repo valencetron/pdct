@@ -19,7 +19,12 @@ All paths resolve through `src/dct/config.py` with this precedence:
 | `PDCT_OVERRIDES_PATH` | `$PDCT_RUNTIME_DIR/pdct-overrides.json` | live tuning-lever overrides |
 | `PDCT_ARCHIVE_ROOT` | `$PDCT_HOME/vault/compaction-archive` | compaction archive corpus (optional) |
 | `PDCT_ANCHOR_PATHS` | `$PDCT_HOME/ANCHOR.md` | `:`-separated always-on context files (optional) |
-| `ANTHROPIC_API_KEY` | — | needed by distiller + judge only; retrieval runs without it |
+| `ANTHROPIC_API_KEY` | — | anthropic provider auth (or Claude Code OAuth login); retrieval runs without it |
+| `PDCT_LLM_PROVIDER` | `anthropic` | `anthropic` or `openai-compatible` |
+| `PDCT_LLM_BASE_URL` | — | OpenAI-compatible endpoint base, e.g. `http://localhost:11434/v1` |
+| `PDCT_LLM_MODEL` | provider default | model name for distiller/judge |
+| `PDCT_LLM_API_KEY` | — | bearer key for the OpenAI-compatible endpoint |
+| `PDCT_SCHEDULER_INTERVAL` | `300` | seconds between supervisor scheduler ticks |
 | `PDCT_DISABLE_ELIGIBILITY` | unset | `1` = index every note regardless of eligibility gate |
 | `DCT_QUERY_COSINE_THRESHOLD` | `0.57` | embedding filter threshold (embeddings extra) |
 

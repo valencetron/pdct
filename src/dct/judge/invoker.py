@@ -109,13 +109,26 @@ def invoke_judge(prompt: str) -> JudgeInvocationResult:
     """
     t0 = time.monotonic()
     try:
-        client = _get_client()
-        resp = client.messages.create(
-            model=_JUDGE_MODEL,
-            max_tokens=256,
-            system=JUDGE_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        from dct import providers as _prov
+        if _prov.provider_name() != "anthropic":
+            raw_text = _prov.complete_text(JUDGE_SYSTEM_PROMPT, prompt,
+                                           max_tokens=256)
+
+            class _Block:  # minimal shim matching resp.content[0].text below
+                text = raw_text
+
+            class _Resp:
+                content = [_Block()]
+
+            resp = _Resp()
+        else:
+            client = _get_client()
+            resp = client.messages.create(
+                model=_JUDGE_MODEL,
+                max_tokens=256,
+                system=JUDGE_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
         latency_ms = int((time.monotonic() - t0) * 1000)
     except Exception as e:
         log.warning("[pdct.judge.invoker] API call failed: %s", e)

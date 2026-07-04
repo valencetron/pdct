@@ -203,6 +203,17 @@ def call_distiller(
       - On AuthenticationError, invoke ``auth.refresh_oauth_via_cli`` and
         rebuild the client once. A second 401 after refresh propagates.
     """
+    # Non-anthropic providers route through the provider abstraction
+    # (JSON-schema emulation + strict parse). The anthropic path below is
+    # unchanged — SDK + OAuth refresh-on-401 — so existing installs are
+    # behavior-identical.
+    from dct import providers as _prov
+    if _prov.provider_name() != "anthropic":
+        user_prompt = build_user_prompt(turns, session_meta, rules_concepts)
+        obj = _prov.complete_json(SYSTEM_PROMPT, user_prompt,
+                                  _TOOL_SCHEMA["input_schema"])
+        return _parse_tool_response(obj)
+
     model_id = resolve_model_id(model)
     user_prompt = build_user_prompt(turns, session_meta, rules_concepts)
     auth_error_cls = _auth_error_cls()
@@ -348,5 +359,36 @@ def call_concept_extractor(text: str, model: str = "haiku") -> list[str]:
     """
     if not text or len(text.strip()) < 12:
         return []
+    from dct import providers as _prov
+    if _prov.provider_name() != "anthropic":
+        try:
+            obj = _prov.complete_json(
+                _CONCEPT_EXTRACTOR_SYSTEM, text[:4000],
+                _CONCEPT_EXTRACTOR_TOOL["input_schema"], max_tokens=256)
+        except _prov.ProviderError:
+            return []
+        items = obj.get("concepts")
+        if not isinstance(items, list):
+            return []
+        out = [c.strip().lower().replace(" ", "-") for c in items
+               if isinstance(c, str) and c.strip() and len(c) <= 60]
+        return out[:8]
     model_id = resolve_model_id(model)
-    return _concept_extractor_via_urllib(text, model_id)
+    concepts = _concept_extractor_via_urllib(text, model_id)
+    if concepts:
+        return concepts
+    # Portable fallback: the shared exampleco oauth_client isn't present on
+    # public installs — use the self-contained provider path instead.
+    try:
+        obj = _prov.complete_json(
+            _CONCEPT_EXTRACTOR_SYSTEM, text[:4000],
+            _CONCEPT_EXTRACTOR_TOOL["input_schema"],
+            model=model_id, max_tokens=256)
+    except _prov.ProviderError:
+        return []
+    items = obj.get("concepts")
+    if not isinstance(items, list):
+        return []
+    out = [c.strip().lower().replace(" ", "-") for c in items
+           if isinstance(c, str) and c.strip() and len(c) <= 60]
+    return out[:8]
