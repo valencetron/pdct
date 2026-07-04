@@ -20,7 +20,7 @@ def test_lever_spec_includes_traversal_core_levers():
     assert "cascade_decay" in LEVER_SPEC
     assert "cascade_depth" in LEVER_SPEC
     d = LEVER_SPEC["cascade_decay"]
-    assert d["type"] == "float" and d["default"] == 0.3
+    assert d["type"] == "float" and d["default"] == 0.4
     assert d["min"] == 0.1 and d["max"] == 0.8
     assert d["env"] == "DCT_CASCADE_DECAY"
     p = LEVER_SPEC["cascade_depth"]

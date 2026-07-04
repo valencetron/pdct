@@ -71,7 +71,7 @@ def test_cascade_hop_two_with_decay(config: RetrievalConfig):
     )
     concepts = {h.concept: h for h in hits}
     assert concepts["qualia"].hop == 2
-    assert concepts["qualia"].score == pytest.approx(concepts["phenomenology"].score * 0.3)
+    assert concepts["qualia"].score == pytest.approx(concepts["phenomenology"].score * 0.4)
 
 
 def test_cascade_depth_one_skips_hop_two(config: RetrievalConfig):

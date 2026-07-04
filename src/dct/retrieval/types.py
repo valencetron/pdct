@@ -52,7 +52,7 @@ class RetrievalConfig:
     # Missing/empty roots are silently skipped.
     archive_roots: list[Path] = field(default_factory=list)
     cascade_depth: int = 2
-    cascade_decay: float = 0.3
+    cascade_decay: float = 0.4
     cascade_budget_ms: int = 800
     cascade_token_cap: int = 10_000
     cascade_score_floor: float = 0.05

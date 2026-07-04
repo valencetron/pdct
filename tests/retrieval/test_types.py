@@ -38,7 +38,7 @@ def test_retrieval_config_defaults(tmp_path):
         surfaces=["voice", "claude-code", "telegram", "vault"],
     )
     assert cfg.cascade_depth == 2
-    assert cfg.cascade_decay == 0.3
+    assert cfg.cascade_decay == 0.4
     assert cfg.cascade_budget_ms == 800
     assert cfg.cascade_token_cap == 10_000
     assert cfg.cascade_score_floor == 0.05

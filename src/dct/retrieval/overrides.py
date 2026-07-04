@@ -38,7 +38,7 @@ LEVER_SPEC: Dict[str, Dict[str, Any]] = {
     "cascade_eligibility_filter_enabled":{"type": "bool",  "default": True, "min": None,"max": None, "env": "DCT_CASCADE_ELIGIBILITY_FILTER"},
     "cascade_transitions_bias":          {"type": "float", "default": 0.5,  "min": 0.0, "max": 3.0, "env": "DCT_TRANSITIONS_BIAS"},
     "cascade_vec_near_decay":            {"type": "float", "default": 0.2,  "min": 0.0, "max": 1.0, "env": "DCT_VEC_NEAR_DECAY"},
-    "cascade_decay":                     {"type": "float", "default": 0.30, "min": 0.1, "max": 0.8, "env": "DCT_CASCADE_DECAY"},
+    "cascade_decay":                     {"type": "float", "default": 0.40, "min": 0.1, "max": 0.8, "env": "DCT_CASCADE_DECAY"},
     "cascade_depth":                     {"type": "int",   "default": 2,    "min": 1,   "max": 4,   "env": "DCT_CASCADE_DEPTH"},
     "cascade_transitions_enabled":       {"type": "bool",  "default": True, "min": None,"max": None, "env": "DCT_TRANSITIONS_ENABLED"},
 }

@@ -51,7 +51,7 @@ def test_build_config_applies_traversal_core_overrides(tmp_path, monkeypatch):
 
     # defaults hold when no file
     cfg0 = service.build_config()
-    assert cfg0.cascade_decay == 0.3
+    assert cfg0.cascade_decay == 0.4
     assert cfg0.cascade_depth == 2
 
     # written override reaches the live config (no restart)

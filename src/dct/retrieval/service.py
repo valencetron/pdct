@@ -502,7 +502,7 @@ def build_config() -> RetrievalConfig:
         # Tier A traversal-core levers (Build #60). Env values are clamped
         # through LEVER_SPEC bounds (same path as file overrides) so a stray
         # DCT_CASCADE_DEPTH=999 can't blow up traversal — Codex diff-audit P1.
-        cascade_decay=_clamp_lever("cascade_decay", _env_float("DCT_CASCADE_DECAY", 0.3)),
+        cascade_decay=_clamp_lever("cascade_decay", _env_float("DCT_CASCADE_DECAY", 0.4)),
         cascade_depth=_clamp_lever("cascade_depth", _env_int("DCT_CASCADE_DEPTH", 2)),
     )
     # Runtime overrides (lever panel): read FRESH per call so a file write takes
