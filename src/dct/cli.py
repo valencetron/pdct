@@ -60,6 +60,10 @@ def _detect_llm() -> tuple[str, str]:
         return "anthropic", "ANTHROPIC_API_KEY env var"
     if os.environ.get("OPENAI_API_KEY"):
         return "openai-compatible", "OPENAI_API_KEY env var (api.openai.com)"
+    codex_auth = Path(os.environ.get("PDCT_CODEX_AUTH_PATH",
+                                     "~/.codex/auth.json")).expanduser()
+    if codex_auth.exists():
+        return "codex-oauth", f"Codex CLI OAuth login ({codex_auth})"
     # local Ollama?
     try:
         import urllib.request
@@ -104,7 +108,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         if provider:
             lines.append(f"PDCT_LLM_PROVIDER={provider}")
         else:
-            lines.append("# PDCT_LLM_PROVIDER=anthropic | openai-compatible")
+            lines.append("# PDCT_LLM_PROVIDER=anthropic | openai-compatible | codex-oauth")
         lines += [
             "# PDCT_LLM_BASE_URL=http://localhost:11434/v1   # for openai-compatible",
             "# PDCT_LLM_MODEL=claude-3-5-haiku-20241022",

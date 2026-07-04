@@ -20,13 +20,51 @@ All paths resolve through `src/dct/config.py` with this precedence:
 | `PDCT_ARCHIVE_ROOT` | `$PDCT_HOME/vault/compaction-archive` | compaction archive corpus (optional) |
 | `PDCT_ANCHOR_PATHS` | `$PDCT_HOME/ANCHOR.md` | `:`-separated always-on context files (optional) |
 | `ANTHROPIC_API_KEY` | — | anthropic provider auth (or Claude Code OAuth login); retrieval runs without it |
-| `PDCT_LLM_PROVIDER` | `anthropic` | `anthropic` or `openai-compatible` |
+| `PDCT_LLM_PROVIDER` | `anthropic` | `anthropic`, `openai-compatible`, or `codex-oauth` (experimental) |
 | `PDCT_LLM_BASE_URL` | — | OpenAI-compatible endpoint base, e.g. `http://localhost:11434/v1` |
 | `PDCT_LLM_MODEL` | provider default | model name for distiller/judge |
 | `PDCT_LLM_API_KEY` | — | bearer key for the OpenAI-compatible endpoint |
+| `PDCT_CODEX_AUTH_PATH` | `~/.codex/auth.json` | codex-oauth: Codex CLI auth file location |
 | `PDCT_SCHEDULER_INTERVAL` | `300` | seconds between supervisor scheduler ticks |
 | `PDCT_DISABLE_ELIGIBILITY` | unset | `1` = index every note regardless of eligibility gate |
 | `DCT_QUERY_COSINE_THRESHOLD` | `0.57` | embedding filter threshold (embeddings extra) |
+
+## LLM providers
+
+PDCT's distiller and judge route through one provider interface with three
+backends. Retrieval works with **no** provider at all (retrieval-only mode).
+
+### `anthropic` (default)
+Claude via `ANTHROPIC_API_KEY`, or zero-key via an existing Claude Code
+OAuth login (Claude Pro/Max subscription) — PDCT sends the first-party
+Claude Code header shape so subscription traffic is treated normally.
+
+### `openai-compatible`
+Any `/v1/chat/completions` endpoint: OpenAI, OpenRouter, Groq, Together,
+and local models via Ollama or LM Studio. Set `PDCT_LLM_BASE_URL` +
+`PDCT_LLM_MODEL` (+ `PDCT_LLM_API_KEY` if the endpoint needs one).
+Structured output is emulated with a JSON-schema prompt + strict parse.
+
+### `codex-oauth` (experimental)
+ChatGPT Plus/Pro subscription via the Codex CLI's OAuth login — zero API
+spend. Requires an existing login: `npm install -g @openai/codex`, then run
+`codex` and sign in, which writes `~/.codex/auth.json`. PDCT reads that
+file, proactively refreshes tokens (writing them back atomically, `0600`,
+so the Codex CLI stays in sync), retries once on 401, and speaks the
+Responses API at the ChatGPT Codex backend with the first-party Codex CLI
+header shape. Keep `auth.json` permissions restricted; never copy tokens
+into config files. Heavy consecutive use may hit ChatGPT account-level
+rate limits.
+
+```bash
+PDCT_LLM_PROVIDER=codex-oauth
+# PDCT_LLM_MODEL=gpt-5.5           # backend slug (default)
+# PDCT_CODEX_AUTH_PATH=~/.codex/auth.json
+```
+
+`pdct doctor` stage 6 validates whichever provider you configured with the
+same functional capability gate (endpoint/auth, structured JSON, concept
+quality, judge round-trip).
 
 ## Tuning levers
 

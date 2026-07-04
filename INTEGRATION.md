@@ -25,7 +25,7 @@ become advisory skips and distillation is disabled.
 | 12 | Retrieval recall | expected note surfaces in top-5 for every question | `retrieval.recall` | yes |
 | 13 | Supervisor (write path) | `pdct daemon` lifecycle: watcher sees a note → event lands in events.jsonl | `daemon.supervisor` | yes |
 | 14 | Live daemon | your running daemon is healthy (watcher alive, scheduler ticking) | `daemon.liveness` | no (`--live`) |
-| 15 | LLM endpoint | configured provider reachable, auth valid | `llm.endpoint` | no* |
+| 15 | LLM endpoint | configured provider reachable, auth valid (anthropic / openai-compatible / codex-oauth) | `llm.endpoint` | no* |
 | 16 | Structured output | model returns parseable JSON matching the distillation schema | `llm.structured` | yes if provider configured |
 | 17 | Concept quality | distilled concepts hit ≥2 of the expected set (minimum capability) | `llm.concepts` | yes if provider configured |
 | 18 | Judge round-trip | judge returns a valid verdict object | `llm.judge` | yes if provider configured |

@@ -13,11 +13,20 @@ Two backends behind one interface:
                      LM Studio. Structured output is emulated with a
                      JSON-schema prompt + strict parse.
 
+  codex-oauth        (experimental) ChatGPT Plus/Pro subscription via the
+                     Codex CLI's OAuth login (~/.codex/auth.json). Speaks
+                     the Responses API at chatgpt.com/backend-api/codex,
+                     auto-refreshes tokens, sends the first-party Codex CLI
+                     header shape. Zero API spend. Structured output is
+                     emulated (prompt + parse), same as openai-compatible.
+
 Config (pdct.env or exported):
-    PDCT_LLM_PROVIDER   anthropic | openai-compatible   (default: anthropic)
-    PDCT_LLM_BASE_URL   e.g. http://localhost:11434/v1  (openai-compatible)
-    PDCT_LLM_MODEL      model name for the endpoint
-    PDCT_LLM_API_KEY    bearer key if the endpoint needs one
+    PDCT_LLM_PROVIDER      anthropic | openai-compatible | codex-oauth
+    PDCT_LLM_BASE_URL      e.g. http://localhost:11434/v1 (openai-compatible)
+    PDCT_LLM_MODEL         model name for the endpoint
+    PDCT_LLM_API_KEY       bearer key if the endpoint needs one
+    PDCT_CODEX_AUTH_PATH   override ~/.codex/auth.json      (codex-oauth)
+    PDCT_CODEX_BASE_URL    override backend URL (tests)     (codex-oauth)
 
 The interface is deliberately tiny — the two shapes PDCT actually needs:
     complete_json(system, user, schema)  -> dict   (distiller-style)
@@ -119,6 +128,9 @@ def provider_available() -> tuple[bool, str]:
         if not model:
             return False, "PDCT_LLM_MODEL not set"
         return True, f"{base} model={model}"
+    if p == "codex-oauth":
+        from dct import codex_auth
+        return codex_auth.default_store().status()
     return False, f"unknown PDCT_LLM_PROVIDER={p!r}"
 
 
@@ -146,6 +158,20 @@ def probe_endpoint(timeout: float = 5.0) -> tuple[bool, str]:
             if "HTTP 400" in msg:
                 return True, "anthropic API reachable, auth valid"
             return False, msg[:200]
+    if p == "codex-oauth":
+        # Token validity/refreshability is the auth probe; then a 1-token
+        # round-trip proves the backend is reachable with this account.
+        from dct import codex_auth
+        try:
+            codex_auth.default_store().get_access_token()
+        except codex_auth.CodexAuthError as e:
+            return False, f"codex-oauth: {e}"[:200]
+        try:
+            _codex_request("Reply with the single word: pong", "ping",
+                           _codex_model(), 16, timeout=timeout)
+            return True, "codex backend reachable, auth valid"
+        except ProviderError as e:
+            return False, str(e)[:200]
     # openai-compatible: hit /models (universally supported, cheap)
     base = os.environ.get("PDCT_LLM_BASE_URL", "").rstrip("/")
     headers = {}
@@ -327,6 +353,146 @@ def _openai_json(system: str, user: str, schema: dict,
     return obj
 
 
+# ── codex-oauth backend (experimental) ──────────────────────────────────────
+
+_CODEX_BACKEND_URL = "https://chatgpt.com/backend-api/codex/responses"
+_CODEX_MODEL_DEFAULT = "gpt-5.5"
+_CODEX_UA = "OpenAI/Codex-CLI/0.125.0"
+
+
+def _codex_model() -> str:
+    return os.environ.get("PDCT_LLM_MODEL") or _CODEX_MODEL_DEFAULT
+
+
+def _codex_backend_url() -> str:
+    """Backend URL. The override exists for tests only and is restricted to
+    loopback — otherwise a poisoned pdct.env could redirect OAuth bearer
+    tokens to an arbitrary server."""
+    override = os.environ.get("PDCT_CODEX_BASE_URL")
+    if not override:
+        return _CODEX_BACKEND_URL
+    from urllib.parse import urlparse
+    host = (urlparse(override).hostname or "").lower()
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return override
+    raise ProviderError(
+        "codex-oauth: PDCT_CODEX_BASE_URL override is restricted to "
+        f"loopback (got {host!r}) — refusing to send OAuth tokens there")
+
+
+def _codex_sse_text(resp) -> str:
+    """Collect output_text deltas from a Responses-API SSE stream."""
+    buf: list[str] = []
+    current_event = ""
+    for raw in resp:
+        line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+        line = line.rstrip("\r\n")
+        if not line:
+            current_event = ""
+            continue
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+            continue
+        if line.startswith("data:"):
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            etype = current_event or obj.get("type", "")
+            if etype == "response.output_text.delta":
+                buf.append(obj.get("delta", "") or "")
+            elif etype == "error":
+                raise ProviderError(
+                    f"codex-oauth: stream error: {obj.get('message') or obj}")
+    return "".join(buf)
+
+
+def _codex_request(system: str, user: str, model: str, max_tokens: int,
+                   timeout: float = 120.0) -> str:
+    """One text round-trip via the ChatGPT/Codex Responses API (SSE)."""
+    from dct import codex_auth
+    store = codex_auth.default_store()
+    try:
+        token = store.get_access_token()
+    except codex_auth.CodexAuthError as e:
+        raise ProviderError(f"codex-oauth: {e}") from e
+
+    body = json.dumps({
+        "model": model,
+        "input": [{"role": "user", "content": user}],
+        "instructions": system or "You are a helpful assistant.",
+        "store": False,       # required by backend
+        "stream": True,       # required by backend
+        "max_output_tokens": max(int(max_tokens), 16),
+        "reasoning": {"effort": "low", "summary": "auto"},
+        "tools": [],
+        "tool_choice": "auto",
+        "parallel_tool_calls": True,
+    }).encode()
+
+    def _attempt(tok: str):
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {tok}",
+            "Accept": "text/event-stream",
+            "User-Agent": _CODEX_UA,   # first-party Codex CLI shape
+        }
+        account_id = codex_auth.extract_account_id(tok)
+        if account_id:
+            headers["ChatGPT-Account-Id"] = account_id
+        req = urllib.request.Request(_codex_backend_url(), data=body,
+                                     headers=headers, method="POST")
+        return urllib.request.urlopen(req, timeout=timeout)
+
+    try:
+        resp = _attempt(token)
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            # Force refresh and retry once (token may be freshly revoked).
+            try:
+                token = store.force_refresh_and_get()
+                resp = _attempt(token)
+            except (codex_auth.CodexAuthError, urllib.error.HTTPError) as e2:
+                raise ProviderError(
+                    f"codex-oauth: auth failed after refresh: {e2}") from e2
+            except (urllib.error.URLError, OSError) as e2:
+                raise ProviderError(f"codex-oauth: {e2}") from e2
+        else:
+            raw = e.read().decode("utf-8", errors="replace")[:300]
+            raise ProviderError(f"codex-oauth: HTTP {e.code} — {raw}") from e
+    except (urllib.error.URLError, OSError) as e:
+        raise ProviderError(f"codex-oauth: network error: {e}") from e
+
+    with resp:
+        text = _codex_sse_text(resp)
+    if not text.strip():
+        raise ProviderError("codex-oauth: empty response from backend")
+    return text
+
+
+def _codex_json(system: str, user: str, schema: dict,
+                model: str, max_tokens: int) -> dict:
+    sys_prompt = (
+        f"{system}\n\nRespond with ONLY a JSON object (no prose, no code "
+        f"fences) that validates against this JSON schema:\n"
+        f"{json.dumps(schema)}"
+    )
+    text = _codex_request(sys_prompt, user, model, max_tokens)
+    try:
+        obj = _extract_json_object(text)
+    except ProviderError as e:
+        raise ProviderError(str(e).replace("openai-compatible", "codex-oauth")) from e
+    missing = [k for k in schema.get("required", []) if k not in obj]
+    if missing:
+        raise ProviderError(
+            f"codex-oauth: JSON missing required fields {missing} — "
+            "model may be below PDCT's minimum capability")
+    return obj
+
+
 # ── public interface ────────────────────────────────────────────────────────
 
 def _default_model(purpose: str) -> str:
@@ -336,6 +502,8 @@ def _default_model(purpose: str) -> str:
     if provider_name() == "anthropic":
         from dct.llm import resolve_model_id
         return resolve_model_id("haiku")
+    if provider_name() == "codex-oauth":
+        return _CODEX_MODEL_DEFAULT
     raise ProviderError("PDCT_LLM_MODEL must be set for openai-compatible")
 
 
@@ -348,6 +516,8 @@ def complete_json(system: str, user: str, schema: dict, *,
         return _anthropic_json(system, user, schema, m, max_tokens)
     if p == "openai-compatible":
         return _openai_json(system, user, schema, m, max_tokens)
+    if p == "codex-oauth":
+        return _codex_json(system, user, schema, m, max_tokens)
     raise ProviderError(f"unknown PDCT_LLM_PROVIDER={p!r}")
 
 
@@ -362,4 +532,6 @@ def complete_text(system: str, user: str, *,
         return _openai_request(
             [{"role": "system", "content": system},
              {"role": "user", "content": user}], m, max_tokens)
+    if p == "codex-oauth":
+        return _codex_request(system, user, m, max_tokens)
     raise ProviderError(f"unknown PDCT_LLM_PROVIDER={p!r}")
