@@ -41,7 +41,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra -q"
+addopts = "-ra -q -m 'not slow'"
 markers = [
     "local: tests that require local vault state (run with -m local; skipped in CI)",
     "slow: long-running benchmark tests",

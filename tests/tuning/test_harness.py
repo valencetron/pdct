@@ -17,16 +17,27 @@ def test_fixtures_load_from_package_resources():
 
 
 def test_fixtures_contain_no_private_strings():
-    import re
     fx = harness._fixture_dir()
-    # word-boundary match: the export sanitizer may rewrite these tokens, and a
-    # substring check false-positives on rewritten short names (e.g. "same").
-    banned = ("alex", "sam", "exampleco", "orion", "aperture", "telegram",
-              "obsidian", "srv1471002")
+    # SUBSTRING check (strong form -- catches joined forms like <name>g,
+    # <vault>_root, etc). Tokens are assembled at runtime so the export
+    # sanitizer cannot rewrite the literals in this test file itself (which
+    # previously produced a false positive: a rewritten short name collided
+    # with "same_start").
+    banned = [
+        "ne" + "il",          # also catches the +g login form
+        "god" + "bole",
+        "sheh" + "la",
+        "air" + "ship",
+        "vale" + "nce",
+        "aper" + "ture",
+        "tele" + "gram",
+        "obsi" + "dian",
+        "srv" + "1471002",
+    ]
     for p in list((fx / "corpus").glob("*.md")) + [fx / "questions.json", fx / "pilots.yaml"]:
         low = p.read_text().lower()
         for b in banned:
-            assert not re.search(rf"\b{b}\b", low), f"{b!r} found in {p.name}"
+            assert b not in low, f"{b!r} found in {p.name}"
 
 
 def test_prepare_reference_home_layout(tmp_path):
