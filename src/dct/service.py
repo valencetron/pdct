@@ -23,7 +23,8 @@ SYSTEMD_UNIT = "pdct-supervisor.service"
 
 _SERVICE_ENV_KEYS = ("PDCT_HOME", "PDCT_VAULT_ROOT", "OBSIDIAN_VAULT",
                      "PDCT_EVENTS_PATH", "PDCT_LLM_PROVIDER",
-                     "PDCT_LLM_BASE_URL", "PDCT_LLM_MODEL", "PDCT_LLM_API_KEY")
+                     "PDCT_LLM_BASE_URL", "PDCT_LLM_MODEL", "PDCT_LLM_API_KEY",
+                     "ANTHROPIC_API_KEY", "PDCT_SCHEDULER_INTERVAL")
 
 
 def _service_env() -> dict[str, str]:

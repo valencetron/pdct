@@ -209,6 +209,13 @@ class _MockHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):  # /models reachability probe
+        body = json.dumps({"data": [{"id": "mock-model"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *a):  # noqa: D102
         pass
 
@@ -396,3 +403,71 @@ def test_judge_routes_via_providers_when_sdk_missing(monkeypatch):
     r = invoker.invoke_judge("test prompt")
     assert r.status not in ("unexpected_error",), r.fail_reason
     assert r.score == 4
+
+
+# ── endpoint probe semantics (Codex round-2 findings 1+2) ───────────────────
+
+def _serve(handler_cls):
+    srv = HTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_probe_endpoint_success_and_auth_reject(monkeypatch):
+    from dct import providers as prov
+
+    class _Ok(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"data": []}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    class _AuthReject(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    class _ServerError(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(502)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    monkeypatch.setenv("PDCT_LLM_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("PDCT_LLM_MODEL", "m")
+
+    srv = _serve(_Ok)
+    monkeypatch.setenv("PDCT_LLM_BASE_URL", f"http://127.0.0.1:{srv.server_port}/v1")
+    ok, detail = prov.probe_endpoint()
+    assert ok and "reachable" in detail
+    srv.shutdown()
+
+    srv = _serve(_AuthReject)
+    monkeypatch.setenv("PDCT_LLM_BASE_URL", f"http://127.0.0.1:{srv.server_port}/v1")
+    ok, detail = prov.probe_endpoint()
+    assert not ok and "auth rejected" in detail
+    srv.shutdown()
+
+    # 5xx = endpoint error, NOT success (Codex: non-401 errors must not pass)
+    srv = _serve(_ServerError)
+    monkeypatch.setenv("PDCT_LLM_BASE_URL", f"http://127.0.0.1:{srv.server_port}/v1")
+    ok, detail = prov.probe_endpoint()
+    assert not ok and "502" in detail
+    srv.shutdown()
+
+    # unreachable port
+    monkeypatch.setenv("PDCT_LLM_BASE_URL", "http://127.0.0.1:9/v1")
+    ok, detail = prov.probe_endpoint()
+    assert not ok and "unreachable" in detail

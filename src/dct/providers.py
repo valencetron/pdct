@@ -159,8 +159,10 @@ def probe_endpoint(timeout: float = 5.0) -> tuple[bool, str]:
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             return False, f"auth rejected by {base} (HTTP {e.code})"
-        # Some servers don't implement /models — reachable is enough.
-        return True, f"{base} reachable (HTTP {e.code} on /models probe)"
+        if e.code in (404, 405, 501):
+            # Server doesn't implement /models — reachable is enough.
+            return True, f"{base} reachable (HTTP {e.code} on /models probe)"
+        return False, f"endpoint error: {base} (HTTP {e.code} on /models)"
     except (urllib.error.URLError, OSError) as e:
         return False, f"endpoint unreachable: {base} — {e}"
 

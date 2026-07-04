@@ -263,7 +263,14 @@ def _start_daemon_locked() -> tuple[bool, str]:
             return False, (f"exited immediately rc={proc.returncode} — "
                            f"see {log_path()}")
         time.sleep(0.1)
-    return False, f"no pidfile after 5s — see {log_path()}"
+    # No pidfile in 5s — kill the child before reporting failure, otherwise
+    # a slow-starting orphan survives and a retry spawns a duplicate.
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    return False, f"no pidfile after 5s (child terminated) — see {log_path()}"
 
 
 def stop_daemon(timeout: float = 10.0) -> tuple[bool, str]:
