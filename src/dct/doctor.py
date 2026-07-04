@@ -50,6 +50,7 @@ CHECK_IDS = [
     "daemon.supervisor",   "daemon.liveness",
     "llm.endpoint",        "llm.structured",     "llm.concepts",
     "llm.judge",
+    "env.sibling",
 ]
 
 
@@ -83,6 +84,8 @@ def _check_environment() -> list[Check]:
         except ImportError:
             checks.append(Check(f"optional:{mod}", False, f"missing — {why}",
                                 required=False, id="env.optional"))
+    from dct import family  # sibling harness detection (advisory)
+    checks.extend(family.sibling_checks(check_cls=Check))
     return checks
 
 

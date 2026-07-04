@@ -16,7 +16,9 @@ else echo "✅ none"; fi
 
 echo "── personal identifiers"
 # Note: [g]odbole-style bracket trick keeps this script from matching itself.
-PATTERNS='neilg|[g]odbole|[s]hehla|valence|airship|/Users/[a-z]|Documents/OBSIDIAN'
+# 'valence' alone is the PUBLIC sibling product (github.com/valencetron/valence)
+# — only private identity forms are forbidden (Build 105 family package).
+PATTERNS='neilg|[g]odbole|[s]hehla|[v]alence-[e]lectron|airship|/Users/[a-z]|Documents/OBSIDIAN'
 HITS=$(grep -rInE "$PATTERNS" . --include="*.py" --include="*.md" \
   --include="*.sh" --include="*.json" --include="*.jsonl" --include="*.yaml" \
   --include="*.toml" --include="*.txt" \

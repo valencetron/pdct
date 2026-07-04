@@ -29,6 +29,7 @@ become advisory skips and distillation is disabled.
 | 16 | Structured output | model returns parseable JSON matching the distillation schema | `llm.structured` | yes if provider configured |
 | 17 | Concept quality | distilled concepts hit ≥2 of the expected set (minimum capability) | `llm.concepts` | yes if provider configured |
 | 18 | Judge round-trip | judge returns a valid verdict object | `llm.judge` | yes if provider configured |
+| 19 | Sibling: valence | advisory family-package detection — a co-installed valence harness (`~/.valence` / `VALENCE_HOME`); reads its fleet-status.json; never affects exit code; silent when absent | `env.sibling` | no (advisory) |
 
 \* `llm.endpoint` is an advisory skip when **no** provider is configured
 (retrieval-only mode). Once a provider *is* configured, rows 16–18 are hard
