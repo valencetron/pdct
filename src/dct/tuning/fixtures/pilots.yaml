@@ -1,0 +1,42 @@
+version: 1
+pilots:
+- id: fx-pilot-1
+  title: Ambiguous opener; arm A primes orchard, arm B primes tidepool
+  same_start:
+  - what have the recent sessions been focusing on?
+  same_end:
+  - so what should the next session revisit first?
+  arms:
+    A:
+      label: orchard path
+      middle:
+      - how is the orchard irrigation and drip line pressure holding up?
+      - did the frost fan schedule change after the rootstock grafting work?
+    B:
+      label: tidepool path
+      middle:
+      - how did the tidepool survey and anemone census go?
+      - did the spring tide window affect the transect lines?
+    C:
+      label: cold
+      middle: []
+- id: fx-pilot-2
+  title: Ambiguous opener; arm A primes foundry, arm B primes observatory
+  same_start:
+  - remind me what the materials ledger has been used for lately
+  same_end:
+  - which measurement should we double-check before the next run?
+  arms:
+    A:
+      label: foundry path
+      middle:
+      - walk me through the bronze alloy ratio and crucible preheat choices
+      - how did the lost wax casting and sprue venting turn out?
+    B:
+      label: observatory path
+      middle:
+      - how is the mirror collimation and guide star drift looking?
+      - did the dew heater band help with the seeing conditions?
+    C:
+      label: cold
+      middle: []

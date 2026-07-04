@@ -151,6 +151,17 @@ def main() -> int:
     except Exception as e:
         _emit(f"distill crashed: {e}", quiet=args.quiet)
 
+    # 2.5 Tuning tick (Build 106) — no-op unless `pdct tune start` enabled it.
+    try:
+        from dct.tuning import telemetry as _tt
+        if _tt.load_config().get("enabled"):
+            from dct.tuning import engine as _te
+            r = _te.run_tick()
+            _emit(f"tune: {r.action} move={r.move} verdict={r.verdict} {r.reason}",
+                  quiet=args.quiet)
+    except Exception as e:
+        _emit(f"tune tick crashed: {e}", quiet=args.quiet)
+
     # 3. Rebuild regions (brain-map cluster detection)
     try:
         from dct.regions import build_regions, DEFAULT_OUTPUT

@@ -253,6 +253,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top", type=int, default=5)
     p.set_defaults(fn=cmd_recall)
 
+    from dct.tuning.cli import register as _register_tune
+    _register_tune(sub)
+
     return ap
 
 

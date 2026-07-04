@@ -131,6 +131,49 @@ def write_override(key: str, value: Any, path: str = OVERRIDES_PATH) -> Dict[str
     return cur
 
 
+def write_overrides_batch(
+    changes: Dict[str, Any], path: str = OVERRIDES_PATH
+) -> Dict[str, Any]:
+    """Apply MULTIPLE lever changes as one atomic transaction (Build 106,
+    Codex plan-audit #2 — combo promotion must not partially apply).
+
+    A value of None means "delete this key" (drop back to env/default).
+    All changes are validated FIRST; any invalid key/value aborts the whole
+    batch (ValueError) with the file untouched. The merged result is written
+    via a single tmp-file + os.replace under the flock, so a crash leaves the
+    file either fully-old or fully-new — never mixed.
+    """
+    validated: Dict[str, Any] = {}
+    for k, v in changes.items():
+        if v is None:
+            if k not in LEVER_SPEC:
+                raise ValueError(f"unknown lever: {k}")
+            validated[k] = None
+            continue
+        cv = clamp(k, v)
+        if cv is None:
+            raise ValueError(f"invalid lever or value: {k}={v!r}")
+        validated[k] = cv
+    with _file_lock(path):
+        cur = load_overrides(path)   # read INSIDE the lock
+        for k, v in validated.items():
+            if v is None:
+                cur.pop(k, None)
+            else:
+                cur[k] = v
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cur, f, indent=2)
+        os.replace(tmp, path)
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        mtmp = _meta_path(path) + ".tmp"
+        with open(mtmp, "w") as f:
+            json.dump({"sinceChangeAt": now,
+                       "lastKey": ",".join(sorted(validated))}, f)
+        os.replace(mtmp, _meta_path(path))
+    return cur
+
+
 def delete_override(key: str, path: str = OVERRIDES_PATH) -> Dict[str, Any]:
     """Remove a SINGLE lever from the override file under the lock, atomically,
     leaving the other overrides intact. Used by the auto-tuner to revert a

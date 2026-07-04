@@ -1,0 +1,122 @@
+{
+ "version": 1,
+ "questions": [
+  {
+   "id": "q-orchard-1",
+   "question": "What did we decide about orchard irrigation and how it interacts with drip line pressure?",
+   "expected_ids": [
+    "fx-orchard-01"
+   ]
+  },
+  {
+   "id": "q-orchard-3",
+   "question": "What did we decide about rootstock grafting and how it interacts with frost fan schedule?",
+   "expected_ids": [
+    "fx-orchard-03"
+   ]
+  },
+  {
+   "id": "q-orchard-5",
+   "question": "What did we decide about pollinator hives and how it interacts with harvest window?",
+   "expected_ids": [
+    "fx-orchard-05"
+   ]
+  },
+  {
+   "id": "q-tidepool-1",
+   "question": "What did we decide about tidepool survey and how it interacts with anemone census?",
+   "expected_ids": [
+    "fx-tidepool-01"
+   ]
+  },
+  {
+   "id": "q-tidepool-3",
+   "question": "What did we decide about spring tide window and how it interacts with transect lines?",
+   "expected_ids": [
+    "fx-tidepool-03"
+   ]
+  },
+  {
+   "id": "q-tidepool-5",
+   "question": "What did we decide about salinity logger and how it interacts with kelp canopy?",
+   "expected_ids": [
+    "fx-tidepool-05"
+   ]
+  },
+  {
+   "id": "q-foundry-1",
+   "question": "What did we decide about bronze alloy ratio and how it interacts with lost wax casting?",
+   "expected_ids": [
+    "fx-foundry-01"
+   ]
+  },
+  {
+   "id": "q-foundry-3",
+   "question": "What did we decide about crucible preheat and how it interacts with sprue venting?",
+   "expected_ids": [
+    "fx-foundry-03"
+   ]
+  },
+  {
+   "id": "q-foundry-5",
+   "question": "What did we decide about patina bath and how it interacts with kiln firing curve?",
+   "expected_ids": [
+    "fx-foundry-05"
+   ]
+  },
+  {
+   "id": "q-observatory-1",
+   "question": "What did we decide about dark sky calendar and how it interacts with mirror collimation?",
+   "expected_ids": [
+    "fx-observatory-01"
+   ]
+  },
+  {
+   "id": "q-observatory-3",
+   "question": "What did we decide about guide star drift and how it interacts with dew heater band?",
+   "expected_ids": [
+    "fx-observatory-03"
+   ]
+  },
+  {
+   "id": "q-observatory-5",
+   "question": "What did we decide about astro imaging stack and how it interacts with seeing conditions?",
+   "expected_ids": [
+    "fx-observatory-05"
+   ]
+  },
+  {
+   "id": "q-bridge-1",
+   "question": "Which sessions connected sensor telemetry to the ongoing programs?",
+   "expected_ids": [
+    "fx-orchard-06",
+    "fx-tidepool-06"
+   ]
+  },
+  {
+   "id": "q-bridge-2",
+   "question": "Where was the materials ledger discussed most recently?",
+   "expected_ids": [
+    "fx-foundry-06",
+    "fx-observatory-06"
+   ]
+  },
+  {
+   "id": "q-vague-1",
+   "question": "What follow-ups were assigned after the anomalies in the casting work?",
+   "expected_ids": [
+    "fx-foundry-01",
+    "fx-foundry-03",
+    "fx-foundry-05"
+   ]
+  },
+  {
+   "id": "q-vague-2",
+   "question": "When is the best window to schedule the next field measurement?",
+   "expected_ids": [
+    "fx-tidepool-03",
+    "fx-orchard-06"
+   ]
+  }
+ ]
+}

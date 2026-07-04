@@ -36,11 +36,15 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"dct.tuning" = ["fixtures/*.json", "fixtures/*.yaml", "fixtures/corpus/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
 markers = [
     "local: tests that require local vault state (run with -m local; skipped in CI)",
+    "slow: long-running benchmark tests",
 ]
 
 [tool.anyio]
