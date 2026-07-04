@@ -426,7 +426,9 @@ def _codex_request(system: str, user: str, model: str, max_tokens: int,
         "instructions": system or "You are a helpful assistant.",
         "store": False,       # required by backend
         "stream": True,       # required by backend
-        "max_output_tokens": max(int(max_tokens), 16),
+        # NOTE: the ChatGPT Codex backend rejects max_output_tokens with
+        # HTTP 400 "Unsupported parameter" (verified live 2026-07-04).
+        # max_tokens is advisory-only for this backend — do not send it.
         "reasoning": {"effort": "low", "summary": "auto"},
         "tools": [],
         "tool_choice": "auto",

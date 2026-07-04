@@ -337,12 +337,16 @@ def test_codex_base_url_override_loopback_only(codex_env, monkeypatch):
         prov.complete_text("sys", "ping")
 
 
-def test_codex_request_sends_max_output_tokens(codex_env, monkeypatch):
-    """F4: caller's max_tokens must reach the wire."""
+def test_codex_request_omits_max_output_tokens(codex_env, monkeypatch):
+    """The ChatGPT Codex backend rejects max_output_tokens with HTTP 400
+    (verified live on the real endpoint, 2026-07-04). The battle-tested
+    daemon provider never sends it. Regression: keep it OFF the wire;
+    max_tokens is advisory-only for this backend."""
     seen: list = []
     srv = _serve(_backend(text="ok", capture=seen))
     monkeypatch.setenv("PDCT_CODEX_BASE_URL",
                        f"http://127.0.0.1:{srv.server_port}/responses")
     prov.complete_text("sys", "ping", max_tokens=99)
     srv.shutdown()
-    assert seen[0]["body"]["max_output_tokens"] == 99
+    assert "max_output_tokens" not in seen[0]["body"]
+    assert "max_tokens" not in seen[0]["body"]
