@@ -90,7 +90,35 @@ fi
 touch "$PDCT_HOME_DIR/.install-probe" 2>/dev/null && rm "$PDCT_HOME_DIR/.install-probe" || {
   echo "❌ PDCT_HOME not writable: $PDCT_HOME_DIR"; exit 1; }
 
-# 5. Self-diagnosis (bundled example corpus — no personal setup needed)
+# 5. Service drift repair — BEFORE doctor (a reinstall rebuilds .venv, so an
+#    installed systemd/launchd unit points at a dead interpreter until
+#    re-rendered; doctor would fail on exactly that). service-status --json
+#    always exits 0 — we branch on parsed state, never exit code (set -e safe).
+SVC_STATE=$(PDCT_HOME="$PDCT_HOME_DIR" python -m dct.cli daemon service-status --json 2>/dev/null \
+  | python -c 'import json,sys; print(json.load(sys.stdin).get("state","unknown"))' 2>/dev/null || echo unknown)
+case "$SVC_STATE" in
+  stale-interpreter|missing-interpreter|broken-interpreter|stale-env|installed-inactive)
+    echo "━━ OS service drift detected ($SVC_STATE) — re-rendering service unit"
+    if PDCT_HOME="$PDCT_HOME_DIR" python -m dct.cli daemon install-service; then
+      # poll up to 10s for the service to come up
+      for _i in $(seq 1 20); do
+        NEW_STATE=$(PDCT_HOME="$PDCT_HOME_DIR" python -m dct.cli daemon service-status --json 2>/dev/null \
+          | python -c 'import json,sys; print(json.load(sys.stdin).get("state","unknown"))' 2>/dev/null || echo unknown)
+        [ "$NEW_STATE" = "healthy" ] && break
+        sleep 0.5
+      done
+      echo "✅ service repaired (state: ${NEW_STATE:-unknown})"
+    else
+      echo "⚠️  service repair failed — run 'pdct daemon install-service' manually"
+    fi
+    ;;
+  not-owned)
+    echo "⚠️  an installed PDCT service belongs to a different install — not touching it" ;;
+  manager-unavailable)
+    echo "⚠️  service manager unreachable (headless box? run: loginctl enable-linger \$USER)" ;;
+esac
+
+# 6. Self-diagnosis (bundled example corpus — no personal setup needed)
 echo "━━ running doctor"
 PDCT_HOME="$PDCT_HOME_DIR" python -m dct.doctor || {
   echo "❌ doctor failed — see failures above"; exit 1; }

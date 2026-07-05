@@ -189,7 +189,24 @@ def _apply(provider: str, base_url: str | None, model: str | None,
     elif key_env:
         updates["PDCT_LLM_API_KEY_ENV"] = key_env
     upsert_env(envf, updates)
+    _warn_stale_service()
     return envf
+
+
+def _warn_stale_service() -> None:
+    """configure just rewrote pdct.env, but a running OS service has env baked
+    into the unit at install time — warn so Build 118's front door doesn't
+    create the exact drift Build 121 detects."""
+    try:
+        from dct import service as _svc
+        st = _svc.service_status()
+        if st["state"] in ("healthy", "stale-env", "installed-inactive",
+                           "installed-disabled"):
+            print("⚠ an installed OS service has environment baked in from "
+                  "install time — run `pdct daemon install-service` to "
+                  "refresh it with the new config.", file=sys.stderr)
+    except Exception:  # noqa: BLE001 — advisory only
+        pass
 
 
 def _probe(envf: Path) -> int:

@@ -175,6 +175,35 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         ok, msg = fn(dry_run=args.dry_run)
         print(msg)
         return 0 if ok else 1
+    if act == "service-status":
+        from dct import service as svc
+        st = svc.service_status()
+        if args.json:
+            # CONTRACT: --json ALWAYS exits 0; callers (install.sh) branch on
+            # ['state'], never on exit code — a set -e script must survive drift.
+            print(json.dumps(st, indent=2))
+            return 0
+        state = st["state"]
+        print(f"service: {state}  ({st.get('unit_path')})")
+        for k, v in st.get("facts", {}).items():
+            if k != "manager":
+                print(f"  {k}: {v}")
+        remedy = {
+            "stale-interpreter": "run: pdct daemon install-service",
+            "missing-interpreter": "run: pdct daemon install-service",
+            "broken-interpreter": "run: pdct daemon install-service",
+            "stale-env": "run: pdct daemon install-service",
+            "installed-inactive": "run: pdct daemon install-service",
+            "manager-unavailable": st.get("facts", {}).get("remedy", ""),
+        }.get(state)
+        if remedy:
+            print(f"  → {remedy}")
+        # installed-disabled only counts as OK when the operator intended it
+        # (intent marker) — an unintentionally disabled service is drift.
+        ok_states = {"healthy", "not-installed"}
+        if state == "installed-disabled" and st.get("facts", {}).get("intentional"):
+            ok_states.add("installed-disabled")
+        return 0 if state in ok_states else 1
     print(f"unknown daemon action: {act}", file=sys.stderr)
     return 2
 
@@ -228,7 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("daemon", help="supervisor control")
     p.add_argument("action", choices=["start", "stop", "restart", "status",
                                       "logs", "install-service",
-                                      "uninstall-service"])
+                                      "uninstall-service", "service-status"])
     p.add_argument("--json", action="store_true")
     p.add_argument("--lines", type=int, default=40)
     p.add_argument("--dry-run", action="store_true",

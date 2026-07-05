@@ -47,7 +47,7 @@ CHECK_IDS = [
     "config.runtime",      "config.credentials",
     "functional.corpus",   "functional.index",   "functional.replay",
     "retrieval.questions", "retrieval.recall",
-    "daemon.supervisor",   "daemon.liveness",
+    "daemon.supervisor",   "daemon.liveness",    "service.installed",
     "llm.endpoint",        "llm.structured",     "llm.concepts",
     "llm.judge",
     "env.sibling",
@@ -390,6 +390,56 @@ def _check_daemon(live: bool) -> list[Check]:
     finally:
         _sh.rmtree(tmp, ignore_errors=True)
 
+    # ── service.installed — OS-service drift check (ALWAYS on, not just
+    # --live: the Prism bug was a dead unit masked by a green non-live doctor).
+    try:
+        from dct import service as _svc
+        sst = _svc.service_status()
+        state = sst["state"]
+        if state == "not-installed":
+            checks.append(Check("OS service installed", True,
+                                "not installed (supervisor mode) — optional: "
+                                "pdct daemon install-service",
+                                required=False, id="service.installed"))
+        elif state == "healthy":
+            pid = (sst["facts"].get("manager") or {}).get("main_pid")
+            checks.append(Check("OS service installed", True,
+                                f"healthy (pid {pid})", id="service.installed"))
+        elif state == "manager-unavailable":
+            checks.append(Check(
+                "OS service installed", False,
+                f"service manager unreachable — {sst['facts'].get('remedy', '')}",
+                required=False, id="service.installed"))
+        elif state == "unknown":
+            checks.append(Check(
+                "OS service installed", False,
+                f"unit unparseable — {sst['facts'].get('error', '')} "
+                "(hand-edited? reinstall with pdct daemon install-service)",
+                required=False, id="service.installed"))
+        elif state == "not-owned":
+            checks.append(Check(
+                "OS service installed", False,
+                f"unit belongs to another PDCT install "
+                f"(PDCT_HOME={sst['facts'].get('unit_pdct_home')}) — not touching it",
+                required=False, id="service.installed"))
+        elif state == "installed-disabled" and sst["facts"].get("intentional"):
+            checks.append(Check("OS service installed", True,
+                                "disabled by operator (intent marker) — OK",
+                                required=False, id="service.installed"))
+        else:
+            # stale/missing/broken-interpreter, stale-env, installed-inactive,
+            # unintended installed-disabled → REQUIRED FAIL. This is exactly
+            # the silently-dead-service class.
+            checks.append(Check(
+                "OS service installed", False,
+                f"{state} — service will not run correctly; "
+                "fix: pdct daemon install-service",
+                id="service.installed"))
+    except Exception as e:  # noqa: BLE001 — drift check must never crash doctor
+        checks.append(Check("OS service installed", False,
+                            f"{type(e).__name__}: {e}", required=False,
+                            id="service.installed"))
+
     if live:
         try:
             from dct import supervisor as sup
@@ -435,6 +485,12 @@ def run(json_out: bool = False, live: bool = False,
             "stages": {k: [c.to_dict() for c in v] for k, v in stages.items()},
         }, indent=2))
     else:
+        if not live:
+            print("┌────────────────────────────────────────────────────────┐\n"
+                  "│ SANDBOX MODE — functional stages ran against the       │\n"
+                  "│ bundled example corpus in a temp dir, NOT your data.   │\n"
+                  "│ Run `pdct doctor --live` to check your real install.   │\n"
+                  "└────────────────────────────────────────────────────────┘")
         for stage, cs in stages.items():
             print(f"\n── {stage} " + "─" * (50 - len(stage)))
             for c in cs:
