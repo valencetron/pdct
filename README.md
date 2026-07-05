@@ -32,6 +32,7 @@ synthetic corpus. If it prints `✅ PDCT healthy`, the system works on your
 machine before you've configured anything.
 
 ```bash
+pdct configure                # detect + set up an LLM provider (any backend)
 python -m dct.doctor          # re-run anytime
 python -m dct.doctor --json   # machine-readable (CI, dashboards)
 python -m dct.doctor --live   # also validate YOUR vault/config

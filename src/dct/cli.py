@@ -256,6 +256,9 @@ def build_parser() -> argparse.ArgumentParser:
     from dct.tuning.cli import register as _register_tune
     _register_tune(sub)
 
+    from dct.configure import add_parser as _register_configure
+    _register_configure(sub)
+
     return ap
 
 

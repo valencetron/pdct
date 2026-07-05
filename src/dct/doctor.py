@@ -239,11 +239,15 @@ def _check_llm() -> list[Check]:
     usable, detail = prov.provider_available()
     if not usable:
         return [Check("llm provider", False,
-                      f"{detail} — distillation disabled, retrieval-only "
-                      "mode available", required=False, id="llm.endpoint")]
+                      f"{detail} — LLM disabled; retrieval-only mode is "
+                      "supported. Run `pdct configure` to enable "
+                      "distillation/judge", required=False, id="llm.endpoint")]
     # Contract: llm.endpoint = "reachable + auth valid" — actually probe it
     # so connectivity/auth failures aren't misreported as capability ones.
     reach_ok, reach_detail = prov.probe_endpoint()
+    if not reach_ok:
+        reach_detail = (reach_detail +
+                        " — run `pdct configure` to fix the provider setup")
     checks.append(Check(f"provider:{prov.provider_name()}", reach_ok,
                         reach_detail, id="llm.endpoint"))
     if not reach_ok:

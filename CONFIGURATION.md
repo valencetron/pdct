@@ -24,6 +24,7 @@ All paths resolve through `src/dct/config.py` with this precedence:
 | `PDCT_LLM_BASE_URL` | — | OpenAI-compatible endpoint base, e.g. `http://localhost:11434/v1` |
 | `PDCT_LLM_MODEL` | provider default | model name for distiller/judge |
 | `PDCT_LLM_API_KEY` | — | bearer key for the OpenAI-compatible endpoint |
+| `PDCT_LLM_API_KEY_ENV` | — | name of another env var holding the key (indirection; written by `pdct configure --key-env`) |
 | `PDCT_CODEX_AUTH_PATH` | `~/.codex/auth.json` | codex-oauth: Codex CLI auth file location |
 | `PDCT_SCHEDULER_INTERVAL` | `300` | seconds between supervisor scheduler ticks |
 | `PDCT_DISABLE_ELIGIBILITY` | unset | `1` = index every note regardless of eligibility gate |
@@ -33,6 +34,32 @@ All paths resolve through `src/dct/config.py` with this precedence:
 
 PDCT's distiller and judge route through one provider interface with three
 backends. Retrieval works with **no** provider at all (retrieval-only mode).
+
+### `pdct configure` — the front door
+
+Don't edit `pdct.env` by hand — run **`pdct configure`**. It detects every
+backend your machine has (Anthropic key or Claude Code OAuth, Codex OAuth,
+`OPENAI_API_KEY`, local Ollama on `:11434`, LM Studio on `:1234`), lets you
+pick one interactively, writes `pdct.env` atomically (preserving your
+comments), and finishes with a live capability probe so you end on a
+verified ✅ rather than a hope.
+
+```bash
+pdct configure                      # interactive: detect → pick → probe
+pdct configure --show               # resolved diagnostics (redacted)
+pdct configure --show --json        # machine-readable, for agents
+
+# non-interactive (scripts / agents):
+pdct configure --provider openai-compatible \
+    --base-url http://localhost:11434/v1 --model llama3.1 \
+    --key-env MY_KEY_VAR            # references the var — no secret on disk
+```
+
+`--key-env NAME` writes `PDCT_LLM_API_KEY_ENV=NAME` so the key stays in your
+environment; `--key VALUE` writes the literal (file is chmod 0600) but warns.
+The post-write probe runs against the *just-written* config even if your
+shell exports conflicting `PDCT_LLM_*` vars. Exit code reflects the probe,
+so `pdct configure --provider ... && pdct daemon start` is safe to script.
 
 ### `anthropic` (default)
 Claude via `ANTHROPIC_API_KEY`, or zero-key via an existing Claude Code

@@ -25,6 +25,8 @@ Config (pdct.env or exported):
     PDCT_LLM_BASE_URL      e.g. http://localhost:11434/v1 (openai-compatible)
     PDCT_LLM_MODEL         model name for the endpoint
     PDCT_LLM_API_KEY       bearer key if the endpoint needs one
+    PDCT_LLM_API_KEY_ENV   name of another env var holding the key
+                           (indirection — no secret written to pdct.env)
     PDCT_CODEX_AUTH_PATH   override ~/.codex/auth.json      (codex-oauth)
     PDCT_CODEX_BASE_URL    override backend URL (tests)     (codex-oauth)
 
@@ -108,6 +110,24 @@ def provider_name() -> str:
     return os.environ.get("PDCT_LLM_PROVIDER", "anthropic").strip().lower()
 
 
+def resolve_api_key() -> str | None:
+    """Bearer key for openai-compatible endpoints, with indirection support.
+
+    Order: PDCT_LLM_API_KEY (literal) → PDCT_LLM_API_KEY_ENV (name of
+    another env var — lets `pdct configure --key-env NAME` avoid writing
+    secrets into pdct.env) → OPENAI_API_KEY.
+    """
+    key = os.environ.get("PDCT_LLM_API_KEY")
+    if key:
+        return key
+    ref = os.environ.get("PDCT_LLM_API_KEY_ENV")
+    if ref:
+        val = os.environ.get(ref)
+        if val:
+            return val
+    return os.environ.get("OPENAI_API_KEY")
+
+
 def provider_available() -> tuple[bool, str]:
     """(usable, detail) — can the configured provider be called at all?"""
     p = provider_name()
@@ -175,7 +195,7 @@ def probe_endpoint(timeout: float = 5.0) -> tuple[bool, str]:
     # openai-compatible: hit /models (universally supported, cheap)
     base = os.environ.get("PDCT_LLM_BASE_URL", "").rstrip("/")
     headers = {}
-    key = os.environ.get("PDCT_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    key = resolve_api_key()
     if key:
         headers["Authorization"] = f"Bearer {key}"
     req = urllib.request.Request(f"{base}/models", headers=headers)
@@ -262,7 +282,7 @@ def _openai_request(messages: list[dict], model: str, max_tokens: int,
     if not base:
         raise ProviderError("openai-compatible: PDCT_LLM_BASE_URL not set")
     headers = {"Content-Type": "application/json"}
-    key = os.environ.get("PDCT_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    key = resolve_api_key()
     if key:
         headers["Authorization"] = f"Bearer {key}"
     payload: dict = {"model": model, "max_tokens": max_tokens,
@@ -537,3 +557,139 @@ def complete_text(system: str, user: str, *,
     if p == "codex-oauth":
         return _codex_request(system, user, m, max_tokens)
     raise ProviderError(f"unknown PDCT_LLM_PROVIDER={p!r}")
+
+
+# ── capability probe (shared by configure + doctor stage 6) ─────────────────
+
+class CapabilityResult:
+    """Plain result object — no doctor Check formatting coupled in."""
+
+    def __init__(self):
+        self.endpoint_ok = False
+        self.endpoint_detail = ""
+        self.structured_ok = False
+        self.structured_detail = ""
+        self.concepts_ok = False
+        self.concepts_detail = ""
+        self.judge_ok = False
+        self.judge_detail = ""
+        self.provider = ""
+        self.model = ""
+
+    @property
+    def ok(self) -> bool:
+        # full minimum capability gate — same bar as doctor stage 6
+        return (self.endpoint_ok and self.structured_ok
+                and self.concepts_ok and self.judge_ok)
+
+    def to_dict(self) -> dict:
+        return {"ok": self.ok, "provider": self.provider, "model": self.model,
+                "endpoint": {"ok": self.endpoint_ok,
+                             "detail": self.endpoint_detail},
+                "structured": {"ok": self.structured_ok,
+                               "detail": self.structured_detail},
+                "concepts": {"ok": self.concepts_ok,
+                             "detail": self.concepts_detail},
+                "judge": {"ok": self.judge_ok,
+                          "detail": self.judge_detail}}
+
+
+class env_overlay:
+    """Temporarily apply an env snapshot so probes run against a JUST-WRITTEN
+    config instead of whatever the shell happens to export (exported vars
+    must not shadow what `pdct configure` just wrote).
+
+    ``overlay`` maps VAR → value; VAR → None means *remove* it.
+    """
+
+    def __init__(self, overlay: dict[str, str | None]):
+        self.overlay = overlay
+        self._saved: dict[str, str | None] = {}
+
+    def __enter__(self):
+        for k, v in self.overlay.items():
+            self._saved[k] = os.environ.get(k)
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return self
+
+    def __exit__(self, *exc):
+        for k, old in self._saved.items():
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
+        return False
+
+
+def check_capability(overlay: dict[str, str | None] | None = None,
+                     timeout: float = 30.0) -> CapabilityResult:
+    """Endpoint reachability + structured-JSON round-trip against the
+    configured (or overlaid) provider. The minimum bar for distillation."""
+    res = CapabilityResult()
+    ctx = env_overlay(overlay) if overlay else None
+    if ctx:
+        ctx.__enter__()
+    try:
+        res.provider = provider_name()
+        res.endpoint_ok, res.endpoint_detail = probe_endpoint(timeout=min(timeout, 10.0))
+        if not res.endpoint_ok:
+            res.structured_detail = "skipped — endpoint unreachable/auth invalid"
+            return res
+        schema = {"type": "object",
+                  "properties": {"summary": {"type": "string"},
+                                 "concepts": {"type": "array",
+                                              "items": {"type": "string"}}},
+                  "required": ["summary", "concepts"]}
+        expected = {"pgvector", "vector-database", "hnsw", "benchmarking",
+                    "retrieval", "vector-search", "recall", "database"}
+        try:
+            res.model = _default_model("json")
+            obj = complete_json(
+                "Distill this exchange into a note. concepts are lowercase "
+                "hyphen-separated slugs.",
+                "user: We benchmarked pgvector against a dedicated vector "
+                "database and chose pgvector for operational simplicity.\n"
+                "assistant: Sensible — HNSW index?\nuser: Yes, HNSW with "
+                "m=16; recall at 10 was 0.94.",
+                schema, max_tokens=512)
+            res.structured_ok = isinstance(obj.get("concepts"), list)
+            res.structured_detail = (f"valid JSON with {sorted(obj.keys())}"
+                                     if res.structured_ok
+                                     else "JSON returned but concepts missing")
+            got = {str(c).strip().lower().replace(" ", "-")
+                   for c in (obj.get("concepts") or [])}
+            overlap = {g for g in got
+                       if any(e in g or g in e for e in expected)}
+            res.concepts_ok = len(overlap) >= 2
+            res.concepts_detail = (f"matched {sorted(overlap)[:4]}"
+                                   if res.concepts_ok else
+                                   f"only matched {sorted(overlap)} — below "
+                                   "minimum capability")
+        except ProviderError as e:
+            res.structured_detail = str(e)[:300]
+            res.concepts_detail = "skipped — structured output failed"
+        # judge round-trip (same bar as doctor llm.judge)
+        try:
+            text = complete_text(
+                "You are a relevance judge. Respond with ONLY a JSON object "
+                '{"score": <0-10 integer>, "rationale": "<one sentence>"}.',
+                "Question: which vector database did the team choose?\n"
+                "Retrieved note: The team benchmarked pgvector and chose it "
+                "for operational simplicity.", max_tokens=128)
+            t = text.strip()
+            if t.startswith("```"):
+                lines = t.splitlines()
+                t = "\n".join(lines[1:-1] if lines[-1].strip() == "```"
+                              else lines[1:]).strip()
+            verdict = json.loads(t[t.find("{"):t.rfind("}") + 1])
+            res.judge_ok = isinstance(verdict.get("score"), (int, float))
+            res.judge_detail = f"verdict score={verdict.get('score')}"
+        except (ProviderError, json.JSONDecodeError, ValueError) as e:
+            res.judge_detail = f"{type(e).__name__}: {str(e)[:200]}"
+        return res
+    finally:
+        if ctx:
+            ctx.__exit__(None, None, None)

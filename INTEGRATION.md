@@ -32,7 +32,11 @@ become advisory skips and distillation is disabled.
 | 19 | Sibling: valence | advisory family-package detection — a co-installed valence harness (`~/.valence` / `VALENCE_HOME`); reads its fleet-status.json; never affects exit code; silent when absent | `env.sibling` | no (advisory) |
 
 \* `llm.endpoint` is an advisory skip when **no** provider is configured
-(retrieval-only mode). Once a provider *is* configured, rows 16–18 are hard
+(retrieval-only mode — a supported state). Run **`pdct configure`** to
+detect what LLM backends your machine has (Anthropic key or Claude OAuth,
+OpenAI key, Codex OAuth, local Ollama / LM Studio) and set one up with a
+verified capability probe; `pdct configure --show` prints the resolved
+provider diagnostics. Once a provider *is* configured, rows 16–18 are hard
 gates: a model that cannot produce schema-valid JSON or acceptable concepts
 is reported as **below minimum capability** and distillation stays disabled.
 

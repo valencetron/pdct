@@ -30,6 +30,7 @@ After install, the `pdct` command is on your venv PATH:
 
 ```bash
 pdct init            # detect your environment, finish setup interactively
+pdct configure       # detect + set up an LLM provider (verified probe)
 pdct doctor --live   # validate YOUR setup end-to-end
 pdct daemon start    # supervisor: vault watcher + scheduler (any POSIX OS)
 pdct daemon install-service   # optional: survive reboot (launchd/systemd)
@@ -61,7 +62,11 @@ pytest -q                      # full test suite
 
 ## LLM providers & minimum requirements
 
-Configure in `pdct.env`:
+Run **`pdct configure`** — it detects what your machine has (Anthropic /
+Claude OAuth, OpenAI key, Codex OAuth, local Ollama or LM Studio), writes
+`pdct.env`, and ends with a live capability probe. Scriptable too:
+`pdct configure --provider openai-compatible --base-url URL --model M
+--key-env VAR`. Or configure `pdct.env` manually:
 
 ```bash
 # Claude subscription or API key (default — auto-detected by pdct init)
