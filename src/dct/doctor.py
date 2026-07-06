@@ -30,7 +30,7 @@ from pathlib import Path
 REQUIRED_DEPS = ["yaml", "watchdog", "sklearn"]
 OPTIONAL_DEPS = {
     "anthropic": "anthropic provider (pip install 'dct[anthropic]') — distiller & judge",
-    "sentence_transformers": "embeddings extra (pip install 'dct[embeddings]') — VEC_NEAR edges",
+    "sentence_transformers": "embeddings — VEC_NEAR semantic edges (installed by default; absent = --minimal install or failed dep — re-run install.sh without --minimal)",
     "numpy": "embeddings extra — vector math",
 }
 

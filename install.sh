@@ -1,13 +1,16 @@
 #!/bin/bash
 # PDCT installer — venv, dependencies, config scaffold, self-diagnosis.
-# Usage: ./install.sh [--with-embeddings] [--pdct-home <dir>]
+# Usage: ./install.sh [--minimal] [--pdct-home <dir>]
+#   default: full install incl. embeddings (VEC_NEAR semantic edges)
+#   --minimal: skip embeddings deps (constrained boxes; ~2GB lighter)
 set -euo pipefail
 
-WITH_EMB=0
+WITH_EMB=1
 PDCT_HOME_DIR="${PDCT_HOME:-$HOME/.pdct}"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --with-embeddings) WITH_EMB=1 ;;
+    --minimal) WITH_EMB=0 ;;
+    --with-embeddings) WITH_EMB=1 ;;  # legacy no-op (now the default)
     --pdct-home) shift; PDCT_HOME_DIR="$1" ;;
     *) echo "unknown flag: $1"; exit 2 ;;
   esac
@@ -58,7 +61,8 @@ if [ "$WITH_EMB" -eq 1 ]; then
   echo "✅ installed dct[dev,embeddings]"
 else
   $PIP install -q -e ".[dev]"
-  echo "✅ installed dct[dev] (add --with-embeddings for VEC_NEAR edges)"
+  echo "✅ installed dct[dev] — minimal (no VEC_NEAR semantic edges;"
+  echo "   re-run install.sh without --minimal to add them)"
 fi
 
 # 3. Config scaffold
@@ -84,6 +88,15 @@ ENVEOF
   echo "✅ config scaffold: $ENVFILE"
 else
   echo "✅ config exists: $ENVFILE"
+fi
+
+# 3b. LLM provider auto-select — probe-first: writes a provider into
+#     pdct.env only after a live capability check passes. Never fails the
+#     install (retrieval works LLM-less); prints detection table on miss.
+echo "━━ configuring LLM provider (auto-detect)"
+if ! PDCT_HOME="$PDCT_HOME_DIR" python -m dct.cli configure --auto; then
+  echo "⚠️  no LLM provider auto-configured — distillation disabled until you run:"
+  echo "    pdct configure"
 fi
 
 # 4. Validate the configured home is real and writable

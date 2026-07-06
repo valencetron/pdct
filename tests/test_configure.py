@@ -27,6 +27,7 @@ class Args:
         self.key = None
         self.key_env = None
         self.no_probe = False
+        self.auto = False
         self.show = False
         self.json = False
         self.paths = False
@@ -335,3 +336,265 @@ def test_capability_gate_requires_all_four(monkeypatch):
     assert not res.ok  # concepts + judge still required
     res.concepts_ok = res.judge_ok = True
     assert res.ok
+
+
+# ── effective provider fallback (Build 122) ────────────────────────────────
+
+class _FakeStore:
+    def __init__(self, ok, detail="ok"):
+        self._ok, self._detail = ok, detail
+
+    def status(self):
+        return self._ok, self._detail
+
+
+@pytest.fixture()
+def _no_explicit_provider(monkeypatch):
+    monkeypatch.delenv("PDCT_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("PDCT_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("PDCT_LLM_MODEL", raising=False)
+    prov._reset_effective_cache()
+    yield
+    prov._reset_effective_cache()
+
+
+def _kill_anthropic(monkeypatch):
+    from dct import auth
+    monkeypatch.setattr(auth, "load_oauth_token",
+                        lambda: (_ for _ in ()).throw(auth.TokenLoadError("x")))
+
+
+def test_explicit_env_always_wins(monkeypatch, _no_explicit_provider):
+    monkeypatch.setenv("PDCT_LLM_PROVIDER", "openai-compatible")
+    assert prov.provider_name() == "openai-compatible"
+    assert prov.raw_provider_name() == "openai-compatible"
+
+
+def test_fallback_anthropic_when_creds_resolve(monkeypatch, _no_explicit_provider):
+    from dct import auth
+    monkeypatch.setattr(auth, "load_oauth_token", lambda: "tok")
+    assert prov.provider_name() == "anthropic"
+
+
+def test_fallback_codex_when_no_anthropic(monkeypatch, _no_explicit_provider):
+    _kill_anthropic(monkeypatch)
+    from dct import codex_auth
+    monkeypatch.setattr(codex_auth, "default_store", lambda: _FakeStore(True))
+    assert prov.provider_name() == "codex-oauth"
+
+
+def test_fallback_openai_compat_when_base_and_model(monkeypatch,
+                                                    _no_explicit_provider):
+    _kill_anthropic(monkeypatch)
+    from dct import codex_auth
+    monkeypatch.setattr(codex_auth, "default_store", lambda: _FakeStore(False))
+    monkeypatch.setenv("PDCT_LLM_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("PDCT_LLM_MODEL", "llama3")
+    assert prov.provider_name() == "openai-compatible"
+
+
+def test_fallback_nothing_usable_stays_anthropic(monkeypatch,
+                                                 _no_explicit_provider):
+    """Legacy error path unchanged: provider_available() explains the miss."""
+    _kill_anthropic(monkeypatch)
+    from dct import codex_auth
+    monkeypatch.setattr(codex_auth, "default_store", lambda: _FakeStore(False))
+    assert prov.provider_name() == "anthropic"
+
+
+def test_fallback_is_cached_per_process(monkeypatch, _no_explicit_provider):
+    _kill_anthropic(monkeypatch)
+    from dct import codex_auth
+    calls = []
+
+    def _store():
+        calls.append(1)
+        return _FakeStore(True)
+
+    monkeypatch.setattr(codex_auth, "default_store", _store)
+    assert prov.provider_name() == "codex-oauth"
+    assert prov.provider_name() == "codex-oauth"
+    assert len(calls) == 1  # second call served from cache
+
+
+def test_no_recursion_provider_name_vs_detect(monkeypatch,
+                                              _no_explicit_provider):
+    """The Codex-audit trap: provider_name() fallback + detect_backends()
+    must not be mutually recursive. Everything unset → both return."""
+    _kill_anthropic(monkeypatch)
+    from dct import codex_auth
+    monkeypatch.setattr(codex_auth, "default_store", lambda: _FakeStore(False))
+    import sys as _sys
+    _sys.setrecursionlimit(200)
+    try:
+        assert prov.provider_name() == "anthropic"
+        cands = ps.detect_backends(probe_local=False)
+        assert isinstance(cands, list) and cands
+    finally:
+        _sys.setrecursionlimit(1000)
+
+
+def test_detect_backends_uses_raw_not_effective(monkeypatch,
+                                                _no_explicit_provider):
+    """Fallback-chosen provider must NOT be marked `configured` — configured
+    means the env explicitly selects it."""
+    _kill_anthropic(monkeypatch)
+    from dct import codex_auth
+    monkeypatch.setattr(codex_auth, "default_store", lambda: _FakeStore(True))
+    assert prov.provider_name() == "codex-oauth"  # fallback active
+    cands = ps.detect_backends(probe_local=False)
+    assert not any(c.configured for c in cands)
+
+
+# ── --auto (Build 122) ──────────────────────────────────────────────────────
+
+from dct.configure import cmd_auto, _auto_pick  # noqa: E402
+
+
+def _cand(name, provider, auth=False, reach=None, source=""):
+    return ps.BackendStatus(name=name, provider=provider, auth_valid=auth,
+                            reachable=reach, source=source, detail=name)
+
+
+def test_auto_pick_ranked_order():
+    cands = [_cand("codex-oauth", "codex-oauth", auth=True),
+             _cand("anthropic", "anthropic", auth=True)]
+    assert _auto_pick(cands).name == "anthropic"
+
+
+def test_auto_pick_skips_locals_and_invalid():
+    cands = [_cand("anthropic", "anthropic", auth=False),
+             _cand("ollama", "openai-compatible", auth=True, reach=True,
+                   source="endpoint")]
+    assert _auto_pick(cands) is None  # locals never auto-picked
+
+
+class _Res:
+    def __init__(self, ok):
+        self.ok = ok
+        self.provider = "codex-oauth"
+        self.model = "m"
+        self.endpoint_ok = self.structured_ok = ok
+        self.concepts_ok = self.judge_ok = ok
+        self.endpoint_detail = self.structured_detail = "d"
+        self.concepts_detail = self.judge_detail = "d"
+
+
+def test_auto_writes_only_after_probe_pass(tmp_path, monkeypatch, capsys):
+    """Codex amendment #5: probe FIRST, write only on pass."""
+    monkeypatch.setenv("PDCT_HOME", str(tmp_path))
+    monkeypatch.setattr("dct.configure.detect_backends",
+                        lambda probe_local=True:
+                        [_cand("codex-oauth", "codex-oauth", auth=True)])
+    monkeypatch.setattr(prov, "check_capability",
+                        lambda overlay=None, **kw: _Res(True))
+    rc = cmd_auto(Args(auto=True))
+    assert rc == 0
+    envf = tmp_path / "pdct.env"
+    assert "PDCT_LLM_PROVIDER=codex-oauth" in envf.read_text()
+
+
+def test_auto_probe_fail_writes_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PDCT_HOME", str(tmp_path))
+    monkeypatch.setattr("dct.configure.detect_backends",
+                        lambda probe_local=True:
+                        [_cand("codex-oauth", "codex-oauth", auth=True)])
+    calls = []
+
+    def _cap(overlay=None, **kw):
+        calls.append(1)
+        return _Res(False)
+
+    monkeypatch.setattr(prov, "check_capability", _cap)
+    rc = cmd_auto(Args(auto=True))
+    assert rc == 1
+    assert len(calls) == 2  # retried once on failure
+    assert not (tmp_path / "pdct.env").exists()
+    out = capsys.readouterr().out
+    assert "no LLM provider auto-configured" in out
+
+
+def test_auto_nothing_usable_prints_table(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PDCT_HOME", str(tmp_path))
+    monkeypatch.setattr("dct.configure.detect_backends",
+                        lambda probe_local=True:
+                        [_cand("anthropic", "anthropic", auth=False),
+                         _cand("ollama", "openai-compatible", auth=True,
+                               reach=True, source="endpoint")])
+    rc = cmd_auto(Args(auto=True))
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "ollama" in out and "pick a model" in out
+
+
+def test_auto_openai_uses_key_env_reference(tmp_path, monkeypatch):
+    """OPENAI_API_KEY is referenced (key-env), never copied into pdct.env."""
+    monkeypatch.setenv("PDCT_HOME", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "x" * 20)
+    monkeypatch.setattr("dct.configure.detect_backends",
+                        lambda probe_local=True:
+                        [_cand("openai", "openai-compatible", auth=True,
+                               source="env")])
+    monkeypatch.setattr(prov, "check_capability",
+                        lambda overlay=None, **kw: _Res(True))
+    rc = cmd_auto(Args(auto=True))
+    assert rc == 0
+    txt = (tmp_path / "pdct.env").read_text()
+    assert "PDCT_LLM_API_KEY_ENV=OPENAI_API_KEY" in txt
+    assert "x" * 20 not in txt
+
+
+def test_bare_nontty_is_report_only_never_writes(tmp_path, monkeypatch, capsys):
+    """Codex diff-audit #2: bare configure stays report-only for scripts —
+    auto-write requires the explicit --auto flag."""
+    monkeypatch.setenv("PDCT_HOME", str(tmp_path))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("dct.configure.detect_backends",
+                        lambda probe_local=True:
+                        [_cand("codex-oauth", "codex-oauth", auth=True)])
+    rc = cmd_configure(Args())
+    assert rc == 2
+    assert not (tmp_path / "pdct.env").exists()
+    out = capsys.readouterr().out
+    assert "auto-selectable: codex-oauth" in out
+    assert "pdct configure --auto" in out
+
+
+def test_bare_nontty_exit2_when_nothing_usable(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PDCT_HOME", str(tmp_path))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("dct.configure.detect_backends",
+                        lambda probe_local=True:
+                        [_cand("anthropic", "anthropic", auth=False)])
+    rc = cmd_configure(Args())
+    assert rc == 2
+    assert "detected backends" in capsys.readouterr().out
+
+
+def test_auto_pick_openai_requires_real_openai_key(monkeypatch):
+    """Codex diff-audit #1: detection accepts key indirection, but cmd_auto
+    writes key_env=OPENAI_API_KEY — so indirection-only must NOT auto-pick."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("MY_KEY", "y" * 20)
+    monkeypatch.setenv("PDCT_LLM_API_KEY_ENV", "MY_KEY")
+    cands = [_cand("openai", "openai-compatible", auth=True, source="env")]
+    assert _auto_pick(cands) is None
+
+
+def test_auto_pick_openai_with_real_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "y" * 20)
+    cands = [_cand("openai", "openai-compatible", auth=True, source="env")]
+    assert _auto_pick(cands).name == "openai"
+
+
+def test_effective_cache_invalidated_by_env_change(monkeypatch,
+                                                   _no_explicit_provider):
+    """Codex diff-audit #3: setting BASE_URL/MODEL mid-process must
+    invalidate the fallback cache, not serve the stale answer."""
+    _kill_anthropic(monkeypatch)
+    from dct import codex_auth
+    monkeypatch.setattr(codex_auth, "default_store", lambda: _FakeStore(False))
+    assert prov.provider_name() == "anthropic"  # nothing usable → legacy
+    monkeypatch.setenv("PDCT_LLM_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("PDCT_LLM_MODEL", "llama3")
+    assert prov.provider_name() == "openai-compatible"  # cache re-keyed

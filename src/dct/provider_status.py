@@ -133,7 +133,7 @@ def _local_statuses(probe: bool) -> list[BackendStatus]:
 def detect_backends(probe_local: bool = True) -> list[BackendStatus]:
     """Ordered candidate list. Marks whichever backend current env selects."""
     from dct import providers as prov
-    active = prov.provider_name()
+    active = prov.raw_provider_name()
     active_base = os.environ.get("PDCT_LLM_BASE_URL", "").rstrip("/")
 
     cands = [_anthropic_status(probe_local), _codex_status(), _openai_status()]

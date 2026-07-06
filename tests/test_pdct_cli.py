@@ -471,3 +471,17 @@ def test_probe_endpoint_success_and_auth_reject(monkeypatch):
     monkeypatch.setenv("PDCT_LLM_BASE_URL", "http://127.0.0.1:9/v1")
     ok, detail = prov.probe_endpoint()
     assert not ok and "unreachable" in detail
+
+
+def test_init_never_writes_unverified_provider(tmp_path):
+    """Build 122 amendment #5: init detection is file-existence only — it
+    must never write an active PDCT_LLM_PROVIDER line (that's configure
+    --auto's job, post-probe). Otherwise a codex-only box gets locked into
+    an explicit-but-unverified provider and the runtime fallback never fires."""
+    home = tmp_path / "pdct"
+    env = _clean_env(home)
+    r = _run_cli(["init", "--home", str(home)], env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    envf = (home / "pdct.env").read_text()
+    for line in envf.splitlines():
+        assert not line.startswith("PDCT_LLM_PROVIDER="), line

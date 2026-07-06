@@ -105,10 +105,12 @@ def cmd_init(args: argparse.Namespace) -> int:
             "# PDCT_SCHEDULER_INTERVAL=300",
             "# ── LLM provider (distillation/judge; optional) ──",
         ]
+        # Never write an UNVERIFIED provider (Build 122): detection here is
+        # file-existence only. `pdct configure --auto` probes live and writes
+        # the provider only after the capability check passes.
         if provider:
-            lines.append(f"PDCT_LLM_PROVIDER={provider}")
-        else:
-            lines.append("# PDCT_LLM_PROVIDER=anthropic | openai-compatible | codex-oauth")
+            lines.append(f"# detected: {provider} — run `pdct configure --auto` to verify+enable")
+        lines.append("# PDCT_LLM_PROVIDER=anthropic | openai-compatible | codex-oauth")
         lines += [
             "# PDCT_LLM_BASE_URL=http://localhost:11434/v1   # for openai-compatible",
             "# PDCT_LLM_MODEL=claude-3-5-haiku-20241022",

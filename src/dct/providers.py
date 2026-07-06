@@ -106,8 +106,76 @@ def first_party_headers(token: str) -> dict[str, str]:
 
 # ── config resolution ───────────────────────────────────────────────────────
 
+def raw_provider_name() -> str:
+    """PDCT_LLM_PROVIDER exactly as set — '' when unset. Never guesses.
+
+    provider_status.detect_backends() MUST use this (not provider_name())
+    to mark the configured backend, otherwise effective-fallback and
+    detection would be mutually recursive.
+    """
+    return os.environ.get("PDCT_LLM_PROVIDER", "").strip().lower()
+
+
+# Per-process cache: the fallback walk hits keychain/auth files, which is
+# too heavy for hot paths (llm.py checks the provider on every call).
+# Keyed on the env inputs that feed the fallback decision, so setting
+# PDCT_LLM_BASE_URL/MODEL mid-process invalidates it. Auth-file changes
+# mid-process stay cached (acceptable: cost of a live auth walk per call
+# is the thing being avoided; configure calls _reset_effective_cache()).
+_effective_cache: dict = {"key": None, "name": None}
+
+
+def _effective_cache_key() -> tuple:
+    return (os.environ.get("PDCT_LLM_BASE_URL", ""),
+            os.environ.get("PDCT_LLM_MODEL", ""))
+
+
+def _reset_effective_cache() -> None:  # tests + configure after env rewrite
+    _effective_cache["key"] = None
+    _effective_cache["name"] = None
+
+
 def provider_name() -> str:
-    return os.environ.get("PDCT_LLM_PROVIDER", "anthropic").strip().lower()
+    """Effective provider: explicit env always wins; when unset, fall back
+    to whatever this machine can actually run instead of nagging for
+    Anthropic (the Prism friction, Build 122).
+
+    Fallback is deliberately DIRECT CHECKS, not detect_backends() — small,
+    deterministic, zero network, and structurally non-recursive:
+      1. Anthropic credentials resolve        -> anthropic  (legacy default)
+      2. Codex CLI OAuth valid                -> codex-oauth
+      3. PDCT_LLM_BASE_URL + PDCT_LLM_MODEL   -> openai-compatible
+      4. nothing usable                       -> anthropic  (legacy error
+         path — provider_available() explains what's missing)
+    Local endpoints (Ollama/LM Studio) are never auto-selected at runtime:
+    they need a model choice, which is configure-time work (`pdct configure`).
+    """
+    raw = raw_provider_name()
+    if raw:
+        return raw
+    ck = _effective_cache_key()
+    if _effective_cache["name"] and _effective_cache["key"] == ck:
+        return _effective_cache["name"]
+    name = "anthropic"
+    from dct import auth
+    try:
+        auth.load_oauth_token()
+    except auth.TokenLoadError:
+        try:
+            from dct import codex_auth
+            ok, _ = codex_auth.default_store().status()
+        except Exception:  # noqa: BLE001
+            ok = False
+        if ok:
+            name = "codex-oauth"
+        elif (os.environ.get("PDCT_LLM_BASE_URL")
+                and os.environ.get("PDCT_LLM_MODEL")):
+            name = "openai-compatible"
+    except Exception:  # noqa: BLE001  — auth chain misbehaving ≠ crash
+        pass
+    _effective_cache["key"] = ck
+    _effective_cache["name"] = name
+    return name
 
 
 def resolve_api_key() -> str | None:

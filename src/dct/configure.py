@@ -6,6 +6,8 @@ an atomic comment-preserving upsert; never requires exported env vars.
 
 Modes:
     pdct configure                      interactive (TTY) / detection report (non-TTY)
+    pdct configure --auto               auto-select best backend (probe-first,
+                                        writes pdct.env only on probe pass)
     pdct configure --provider X ...     non-interactive, agent/script friendly
     pdct configure --show [--json]      redacted diagnostics view
 """
@@ -133,6 +135,7 @@ def cmd_show(args: argparse.Namespace) -> int:
     active = prov.provider_name()
     info = {
         "provider": active,
+        "provider_source": "env" if prov.raw_provider_name() else "auto-fallback",
         "model": os.environ.get("PDCT_LLM_MODEL", "(provider default)"),
         "base_url": os.environ.get("PDCT_LLM_BASE_URL", ""),
         "key": _key_status(),
@@ -189,6 +192,7 @@ def _apply(provider: str, base_url: str | None, model: str | None,
     elif key_env:
         updates["PDCT_LLM_API_KEY_ENV"] = key_env
     upsert_env(envf, updates)
+    prov._reset_effective_cache()  # provider may have just changed
     _warn_stale_service()
     return envf
 
@@ -228,9 +232,99 @@ def _probe(envf: Path) -> int:
     return 1
 
 
+# ── --auto (Build 122) ──────────────────────────────────────────────────────
+
+# OpenAI auto-select needs a concrete model; the probe validates it live, so
+# a wrong guess fails loudly rather than silently.
+_OPENAI_AUTO_MODEL = "gpt-5.5"
+_AUTO_RANK = ("anthropic", "codex-oauth", "openai")
+
+
+def _auto_pick(cands: list[BackendStatus]) -> BackendStatus | None:
+    """Ranked auto-selection. Locals are NEVER auto-picked (no model known —
+    that's configure-time interactive work). openai is auto-pickable ONLY
+    when OPENAI_API_KEY itself is set: detection accepts indirection
+    (PDCT_LLM_API_KEY[_ENV]) but cmd_auto writes key_env=OPENAI_API_KEY, so
+    any other key source would be probed with the wrong credential."""
+    byname = {c.name: c for c in cands}
+    for name in _AUTO_RANK:
+        c = byname.get(name)
+        if c is None or not c.auth_valid:
+            continue
+        if name == "openai" and not os.environ.get("OPENAI_API_KEY"):
+            continue
+        return c
+    return None
+
+
+def _print_detection_table(cands: list[BackendStatus]) -> None:
+    for c in cands:
+        mark = "●" if (c.auth_valid or c.reachable) else "○"
+        print(f"  {mark} {c.name:<12} {c.detail}")
+
+
+def cmd_auto(args: argparse.Namespace) -> int:
+    """Pick the best usable backend, PROBE FIRST, write only on pass.
+
+    Ordering is the point (Codex amendment #5): pdct.env gets a provider
+    line only after the capability probe passes, so a failed auto-select
+    can never lock a machine into a broken explicit config.
+    """
+    cands = detect_backends(probe_local=True)
+    sel = _auto_pick(cands)
+    if sel is None:
+        print("⚠ no LLM provider auto-configurable — detected:")
+        _print_detection_table(cands)
+        locals_up = [c for c in cands if c.source == "endpoint" and c.reachable]
+        if locals_up:
+            print(f"\nlocal endpoint(s) answering ({', '.join(c.name for c in locals_up)}) "
+                  "— run `pdct configure` to pick a model for one.")
+        else:
+            print("\nrun: pdct configure")
+        return 1
+
+    base_url = model = key_env = None
+    if sel.name == "openai":
+        base_url = "https://api.openai.com/v1"
+        model = _OPENAI_AUTO_MODEL
+        key_env = "OPENAI_API_KEY"
+    print(f"auto-selected: {sel.name} ({sel.detail})")
+
+    # probe BEFORE writing — overlay simulates the would-be config
+    overlay: dict[str, str | None] = {
+        "PDCT_LLM_PROVIDER": sel.provider,
+        "PDCT_LLM_BASE_URL": base_url,
+        "PDCT_LLM_MODEL": model,
+        "PDCT_LLM_API_KEY": None,
+        "PDCT_LLM_API_KEY_ENV": key_env,
+    }
+    for attempt in (1, 2):  # one retry on transient flake (VPS 429s)
+        res = prov.check_capability(overlay)
+        if res.ok:
+            break
+        if attempt == 1:
+            print("  probe failed — retrying once …")
+    print(f"  endpoint   : {'✅' if res.endpoint_ok else '❌'} {res.endpoint_detail}")
+    print(f"  structured : {'✅' if res.structured_ok else '❌'} {res.structured_detail}")
+    print(f"  concepts   : {'✅' if res.concepts_ok else '❌'} {res.concepts_detail}")
+    print(f"  judge      : {'✅' if res.judge_ok else '❌'} {res.judge_detail}")
+    if not res.ok:
+        print("⚠ no LLM provider auto-configured (probe failed) — detected:")
+        _print_detection_table(cands)
+        print("\nrun: pdct configure")
+        return 1
+    envf = _apply(sel.provider, base_url, model, None, key_env)
+    prov._reset_effective_cache()
+    print(f"✅ auto-configured {sel.name} — wrote {envf}")
+    return 0
+
+
 def cmd_configure(args: argparse.Namespace) -> int:
     if args.show:
         return cmd_show(args)
+
+    if getattr(args, "auto", False):
+        return cmd_auto(args)
 
     if args.key and args.key_env:
         print("error: --key and --key-env are mutually exclusive",
@@ -250,16 +344,22 @@ def cmd_configure(args: argparse.Namespace) -> int:
                       args.key, args.key_env)
         print(f"wrote {envf}")
         if args.no_probe:
+            print("⚠ UNVERIFIED: --no-probe skipped the capability check — "
+                  "run `pdct doctor --live` before trusting this config.",
+                  file=sys.stderr)
             return 0
         return _probe(envf)
 
-    # bare invocation
+    # bare invocation — non-TTY stays REPORT-ONLY (documented contract:
+    # scripts/agents running bare `pdct configure` get diagnostics, never a
+    # write). Auto-write is opt-in via --auto; we point at it when usable.
     cands = detect_backends(probe_local=True)
     if not sys.stdin.isatty():
         print("detected backends (non-interactive — use flags to configure):")
-        for c in cands:
-            mark = "●" if (c.auth_valid or c.reachable) else "○"
-            print(f"  {mark} {c.name:<12} {c.detail}")
+        _print_detection_table(cands)
+        auto = _auto_pick(cands)
+        if auto is not None:
+            print(f"\nauto-selectable: {auto.name} — run: pdct configure --auto")
         print("\nusage: pdct configure --provider "
               "{anthropic|openai-compatible|codex-oauth} "
               "[--base-url URL --model M] [--key-env NAME | --key VALUE]")
@@ -272,9 +372,12 @@ def cmd_configure(args: argparse.Namespace) -> int:
         mark = "●" if (c.auth_valid or c.reachable) else "○"
         print(f"  {i}. {mark} {c.name:<12} {c.detail}")
     print("\n(● = usable now, ○ = needs credentials)")
+    default_cand = _auto_pick(cands) or (usable[0] if usable else None)
     default = next((str(i) for i, c in enumerate(cands, 1)
-                    if c is (usable[0] if usable else None)), "1")
-    choice = input(f"\nselect a backend [{default}]: ").strip() or default
+                    if c is default_cand), "1")
+    default_name = cands[int(default) - 1].name
+    choice = input(f"\nselect a backend [Enter = {default_name}]: "
+                   ).strip() or default
     try:
         sel = cands[int(choice) - 1]
     except (ValueError, IndexError):
@@ -322,6 +425,9 @@ def add_parser(sub) -> None:
     p.add_argument("--key", help="API key literal (written to pdct.env, 0600 — "
                                  "prefer --key-env)")
     p.add_argument("--key-env", help="name of an env var holding the API key")
+    p.add_argument("--auto", action="store_true",
+                   help="auto-select the best detected backend "
+                        "(probe first, write only on pass)")
     p.add_argument("--no-probe", action="store_true",
                    help="skip the post-write capability probe")
     p.add_argument("--show", action="store_true",
