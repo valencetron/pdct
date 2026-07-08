@@ -488,7 +488,7 @@ def _check_daemon(live: bool) -> list[Check]:
                     f"no transcripts at {g}, events.jsonl empty, 0 distillations "
                     f"— pipeline will produce nothing until a source is wired. "
                     f"Drop transcripts in {src_dir} or set PDCT_TRANSCRIPTS_GLOB "
-                    f"(see INTEGRATION.md).",
+                    f"(see {src_dir}/README.md for the format).",
                     required=False, id="capture.source"))
             else:
                 checks.append(Check(

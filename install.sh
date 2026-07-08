@@ -67,11 +67,74 @@ fi
 
 # 3. Config scaffold
 mkdir -p "$PDCT_HOME_DIR"/{vault/distillations,runtime,logs,data,transcripts}
+
+# 3a. Capture source seam — the default transcript source is a real, empty dir
+#     the daemon polls every tick. Drop *.json here (or point the glob
+#     elsewhere) and the pipeline starts filling the vault. Ship a README so
+#     the format + override are discoverable, not folklore.
+TRANSCRIPTS_README="$PDCT_HOME_DIR/transcripts/README.md"
+if [ ! -f "$TRANSCRIPTS_README" ]; then
+  cat > "$TRANSCRIPTS_README" <<'TREOF'
+# PDCT capture source
+
+This is the **default** place PDCT looks for conversation transcripts to
+ingest. The daemon's scheduler polls this directory every tick, feeds new
+files into `events.jsonl`, and the distiller writes Markdown notes into
+`../vault/distillations/`.
+
+Nothing is here yet — that's normal on a fresh install. **Drop transcript
+JSON files here and the pipeline starts working.** No transcripts = empty
+vault (this is what `pdct doctor` flags as an advisory `capture.source`
+warning; it is not an error).
+
+## Change or add a source
+
+Point PDCT at your own transcript directory instead (or in addition) by
+setting the glob in `../pdct.env`:
+
+    export PDCT_TRANSCRIPTS_GLOB="$HOME/my-stack/transcripts/*.json"
+
+The env var takes precedence over this default dir. Use any glob your shell
+supports. Restart the daemon after changing it:
+
+    systemctl --user restart pdct-supervisor.service   # Linux
+    # or: pdct daemon restart
+
+## File format
+
+Each file is one conversation, a JSON object shaped like:
+
+    {
+      "timestamp": "2026-07-08T20:00:00Z",     # ISO8601, required
+      "transcript": [
+        {"role": "user",  "message": "hey",  "time_in_call_secs": 0.0},
+        {"role": "agent", "message": "hi",   "time_in_call_secs": 3.2}
+      ],
+      "metadata": {"chat_id": "123", "topic_id": "456"}   # optional
+    }
+
+- `role`: `user`, `agent` (→ stored as `assistant`), or any role string.
+- `message`: the turn text (empty/whitespace turns are skipped).
+- `time_in_call_secs`: ordering offset within the call (optional; falls
+  back to array index).
+- Filename convention: `<timestamp>_conv_<id>.json` (also accepts
+  `<ts>_call_<id>.json`, or `<ts>_<anything>.json` for ad-hoc).
+
+Malformed files are skipped with a logged warning — they won't crash the
+daemon. Re-running ingest is idempotent (turns are de-duped).
+TREOF
+  echo "✅ capture-source README: $TRANSCRIPTS_README"
+fi
+
 ENVFILE="$PDCT_HOME_DIR/pdct.env"
 if [ ! -f "$ENVFILE" ]; then
   cat > "$ENVFILE" <<ENVEOF
 # PDCT configuration — source this file or export the vars.
 export PDCT_HOME="$PDCT_HOME_DIR"
+# Capture source: where PDCT reads transcripts to ingest. Defaults to
+# \$PDCT_HOME/transcripts/*.json (a real dir; see its README.md for format).
+# Uncomment to point at your own stack's transcript dir instead:
+# export PDCT_TRANSCRIPTS_GLOB="\$HOME/my-stack/transcripts/*.json"
 # Point at an existing Obsidian vault instead (optional):
 # export OBSIDIAN_VAULT="\$HOME/Documents/MyVault"
 # LLM provider (distiller/judge; retrieval works without any LLM).
