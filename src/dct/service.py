@@ -452,8 +452,19 @@ def service_status() -> dict:
     home_match = (unit_home is None) or (
         os.path.normpath(os.path.expanduser(unit_home))
         == os.path.normpath(os.path.expanduser(our_home)))
-    interp_is_ours = os.path.normpath(interp) == os.path.normpath(sys.executable)
     interp_exists = Path(interp).exists()
+    # "Ours" = same venv, compared by the interpreter's bin/ directory — NOT a
+    # raw string of the executable and NOT realpath. A single venv exposes the
+    # interpreter under several symlink aliases (python, python3, python3.13);
+    # the unit records whichever sys.executable was current at install time,
+    # and a later shell may resolve a different alias of the SAME venv. Raw
+    # string compare then false-REDs a healthy service as stale-interpreter
+    # (observed on the VPS). Comparing bin/ dirs treats all aliases of one
+    # venv as ours, while still catching a genuine venv relocation/rebuild
+    # (different .venv path) — realpath would wrongly collapse distinct venvs
+    # that share a base system python.
+    interp_is_ours = (os.path.normpath(os.path.dirname(interp))
+                      == os.path.normpath(os.path.dirname(sys.executable)))
     owned = home_match or interp_is_ours
     result["facts"]["owned"] = owned
     if not owned:

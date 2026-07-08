@@ -115,6 +115,26 @@ def test_stale_interpreter_old_venv_still_exists(linux_env, tmp_path, monkeypatc
     assert st["facts"]["owned"] is True
 
 
+def test_interpreter_alias_of_same_venv_is_healthy(linux_env, tmp_path, monkeypatch):
+    """False-RED regression (observed on VPS): the unit records one symlink
+    alias of the venv interpreter (…/bin/python) while a later shell resolves
+    a different alias of the SAME venv (…/bin/python3.13). Same venv bin/ dir →
+    must be healthy, NOT stale-interpreter."""
+    home, unit = linux_env
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"          # unit records this alias
+    py313 = venv_bin / "python3.13"   # current shell resolves this alias
+    py.write_text("#!/bin/sh\n")
+    py313.write_text("#!/bin/sh\n")
+    _mk_systemd_unit(unit, str(py), str(home))
+    monkeypatch.setattr(service.sys, "executable", str(py313))
+    monkeypatch.setattr(service, "_interpreter_functional", lambda i: (True, "ok"))
+    st = service.service_status()
+    assert st["state"] == "healthy", st["facts"]
+    assert st["facts"]["owned"] is True
+
+
 def test_stale_env_our_interpreter_foreign_home(linux_env, tmp_path):
     """Unit runs OUR venv python but with a different PDCT_HOME → stale-env
     (owned, repairable FAIL), not not-owned (Codex #1)."""
