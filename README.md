@@ -4,8 +4,6 @@ A memory and retrieval system for LLM agents that builds a **concept knowledge
 graph from conversation history** and retrieves context by *traversing* it —
 not just by embedding similarity.
 
-**Paper:** [PDCT: Conversational Retrieval is Path-Dependent (working paper, v3)](https://airshiplaboratories.com/research/pdct-v3/) — this repository is the open-source implementation and benchmark harness described in §4–§10.
-
 Most retrieval systems answer "what text looks like this query?" PDCT answers
 a different question: **"given the path this conversation has taken, what does
 the agent most plausibly need to remember right now?"** It does this by
@@ -24,7 +22,7 @@ maintaining:
 ## Quickstart
 
 ```bash
-git clone https://github.com/valencetron/pdct && cd pdct
+git clone <this repo> && cd pdct
 ./install.sh                 # venv, deps, config scaffold, self-test
 ```
 

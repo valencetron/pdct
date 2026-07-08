@@ -66,7 +66,7 @@ else
 fi
 
 # 3. Config scaffold
-mkdir -p "$PDCT_HOME_DIR"/{vault/distillations,runtime,logs,data}
+mkdir -p "$PDCT_HOME_DIR"/{vault/distillations,runtime,logs,data,transcripts}
 ENVFILE="$PDCT_HOME_DIR/pdct.env"
 if [ ! -f "$ENVFILE" ]; then
   cat > "$ENVFILE" <<ENVEOF
@@ -107,28 +107,54 @@ touch "$PDCT_HOME_DIR/.install-probe" 2>/dev/null && rm "$PDCT_HOME_DIR/.install
 #    installed systemd/launchd unit points at a dead interpreter until
 #    re-rendered; doctor would fail on exactly that). service-status --json
 #    always exits 0 — we branch on parsed state, never exit code (set -e safe).
-SVC_STATE=$(PDCT_HOME="$PDCT_HOME_DIR" python -m dct.cli daemon service-status --json 2>/dev/null \
-  | python -c 'import json,sys; print(json.load(sys.stdin).get("state","unknown"))' 2>/dev/null || echo unknown)
+svc_state() {
+  PDCT_HOME="$PDCT_HOME_DIR" python -m dct.cli daemon service-status --json 2>/dev/null \
+    | python -c 'import json,sys; print(json.load(sys.stdin).get("state","unknown"))' 2>/dev/null \
+    || echo unknown
+}
+# install-service, then poll up to 10s for it to come up healthy.
+install_and_poll() {
+  local label="$1"
+  echo "━━ $label — rendering + enabling service unit"
+  if PDCT_HOME="$PDCT_HOME_DIR" python -m dct.cli daemon install-service; then
+    for _i in $(seq 1 20); do
+      [ "$(svc_state)" = "healthy" ] && break
+      sleep 0.5
+    done
+    echo "✅ service active (state: $(svc_state))"
+  else
+    echo "⚠️  service install failed — run 'pdct daemon install-service' manually"
+  fi
+}
+
+SVC_STATE=$(svc_state)
 case "$SVC_STATE" in
+  # Fresh box (not-installed) and disabled-but-present both need a real install —
+  # NOT just drift repair. This was the gap: a first-time install fell through
+  # here and the daemon never persisted.
+  not-installed|installed-disabled)
+    install_and_poll "installing persistent service" ;;
   stale-interpreter|missing-interpreter|broken-interpreter|stale-env|installed-inactive)
-    echo "━━ OS service drift detected ($SVC_STATE) — re-rendering service unit"
-    if PDCT_HOME="$PDCT_HOME_DIR" python -m dct.cli daemon install-service; then
-      # poll up to 10s for the service to come up
-      for _i in $(seq 1 20); do
-        NEW_STATE=$(PDCT_HOME="$PDCT_HOME_DIR" python -m dct.cli daemon service-status --json 2>/dev/null \
-          | python -c 'import json,sys; print(json.load(sys.stdin).get("state","unknown"))' 2>/dev/null || echo unknown)
-        [ "$NEW_STATE" = "healthy" ] && break
-        sleep 0.5
-      done
-      echo "✅ service repaired (state: ${NEW_STATE:-unknown})"
-    else
-      echo "⚠️  service repair failed — run 'pdct daemon install-service' manually"
-    fi
-    ;;
+    install_and_poll "OS service drift detected ($SVC_STATE)" ;;
   not-owned)
     echo "⚠️  an installed PDCT service belongs to a different install — not touching it" ;;
   manager-unavailable)
-    echo "⚠️  service manager unreachable (headless box? run: loginctl enable-linger \$USER)" ;;
+    # Headless box (VPS, no login session): the user systemd bus needs lingering.
+    # Enable it ourselves, then actually try to install — don't just print a hint.
+    echo "━━ service manager unreachable (headless box) — enabling user lingering"
+    if loginctl enable-linger "$USER" 2>/dev/null; then
+      export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+      NEW_STATE=$(svc_state)
+      if [ "$NEW_STATE" = "manager-unavailable" ]; then
+        echo "⚠️  still unreachable after enable-linger — may need a re-login;"
+        echo "    then run: pdct daemon install-service"
+      else
+        install_and_poll "lingering enabled ($NEW_STATE)"
+      fi
+    else
+      echo "⚠️  could not enable lingering (need sudo?) — run manually:"
+      echo "    sudo loginctl enable-linger $USER && pdct daemon install-service"
+    fi ;;
 esac
 
 # 6. Self-diagnosis (bundled example corpus — no personal setup needed)

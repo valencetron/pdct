@@ -21,7 +21,6 @@ anthropic = [
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
-    "anyio>=4.0",
 ]
 
 # Track C — VEC_NEAR embedding edges (optional; graceful fallback if absent)
@@ -46,7 +45,6 @@ addopts = "-ra -q -m 'not slow'"
 markers = [
     "local: tests that require local vault state (run with -m local; skipped in CI)",
     "slow: long-running benchmark tests",
-    "anyio: async tests run under the anyio pytest plugin",
 ]
 
 [tool.anyio]

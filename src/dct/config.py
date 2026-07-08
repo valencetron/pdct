@@ -44,6 +44,25 @@ def events_path() -> Path:
     return _env_path("PDCT_EVENTS_PATH") or pdct_home() / "events.jsonl"
 
 
+def transcripts_glob() -> str:
+    """Glob the scheduler ingests transcripts from, into the event log.
+
+    Single source of truth (scheduler + doctor both read this). Precedence:
+      1. PDCT_TRANSCRIPTS_GLOB env var (point at your stack's transcript dir)
+      2. $PDCT_HOME/transcripts/*.json — a real dir install.sh scaffolds.
+
+    The old module-level default pointed at a path that exists on no fresh
+    install, so the scheduler silently ingested nothing. Defaulting inside
+    PDCT_HOME means the source dir always exists (empty until a source is
+    wired) — no phantom path, and doctor can honestly distinguish an
+    empty-but-present capture source from a broken one.
+    """
+    v = os.environ.get("PDCT_TRANSCRIPTS_GLOB")
+    if v:
+        return v
+    return str(pdct_home() / "transcripts" / "*.json")
+
+
 def runtime_dir() -> Path:
     return _env_path("PDCT_RUNTIME_DIR") or pdct_home() / "runtime"
 

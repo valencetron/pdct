@@ -463,7 +463,49 @@ def _check_daemon(live: bool) -> list[Check]:
             checks.append(Check("live daemon healthy", False,
                                 f"{type(e).__name__}: {e}", required=False,
                                 id="daemon.liveness"))
+
+        # capture.source — the pipeline is: transcripts (glob) → events.jsonl →
+        # distiller → vault/*.md. A green doctor on an EMPTY pipeline (no
+        # transcripts, no events, no distillations) is a lie: the daemon can be
+        # perfectly healthy and still produce nothing forever because no source
+        # is wired. Surface it as an advisory WARN, not a false pass.
+        try:
+            import glob as _glob
+            from dct import config as _c
+            g = _c.transcripts_glob()
+            n_src = len(_glob.glob(g))
+            ev = _c.events_path()
+            ev_lines = 0
+            if ev.exists():
+                _t = ev.read_text(errors="ignore").strip()
+                ev_lines = len(_t.splitlines()) if _t else 0
+            n_md = sum(len(list(r.rglob("*.md")))
+                       for r in _existing_vault_roots())
+            src_dir = Path(g).parent
+            if n_src == 0 and ev_lines == 0 and n_md == 0:
+                checks.append(Check(
+                    "capture source wired", False,
+                    f"no transcripts at {g}, events.jsonl empty, 0 distillations "
+                    f"— pipeline will produce nothing until a source is wired. "
+                    f"Drop transcripts in {src_dir} or set PDCT_TRANSCRIPTS_GLOB "
+                    f"(see INTEGRATION.md).",
+                    required=False, id="capture.source"))
+            else:
+                checks.append(Check(
+                    "capture source wired", True,
+                    f"{n_src} transcript file(s) at glob, {ev_lines} event(s), "
+                    f"{n_md} distillation(s)", id="capture.source"))
+        except Exception as e:  # noqa: BLE001 — advisory only, never crash doctor
+            checks.append(Check("capture source wired", False,
+                                f"{type(e).__name__}: {e}", required=False,
+                                id="capture.source"))
     return checks
+
+
+def _existing_vault_roots() -> list[Path]:
+    """Vault distillation roots that actually exist on disk (for capture check)."""
+    from dct import config as _c
+    return [r for r in _c.vault_roots() if r.exists()]
 
 
 def run(json_out: bool = False, live: bool = False,

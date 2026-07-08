@@ -33,9 +33,10 @@ from dct import config as _cfg
 EVENTS_JSONL = _cfg.events_path()
 VAULT_ROOT = _cfg.vault_roots()[0].parent if _cfg.vault_roots() else _cfg.pdct_home() / "vault"
 import os as _os
-TRANSCRIPTS_GLOB = _os.environ.get(
-    "PDCT_TRANSCRIPTS_GLOB",
-    str(Path.home() / "example-stack" / "tools" / "transcripts" / "*.json"))
+# Single source of truth (config.transcripts_glob): env override, else a real
+# dir inside PDCT_HOME that install.sh scaffolds — never a phantom default
+# path that made the scheduler silently ingest nothing.
+TRANSCRIPTS_GLOB = _cfg.transcripts_glob()
 
 
 def _emit(msg: str, *, quiet: bool) -> None:
