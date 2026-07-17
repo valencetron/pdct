@@ -428,12 +428,20 @@ def query_cosine_filter(
         if _model_override == "__RAISE__":
             raise RuntimeError("simulated model failure")
 
-        # Use the already-loaded singleton from vec_index.
+        # Use the already-loaded singleton from vec_index. NEVER construct
+        # here: this runs inside the 3s cascade budget and the model load is
+        # ~6s (2026-07-16 root cause — every cascade timed out for 24h+).
+        # Not-warm → fail open immediately; the accessor kicks a background
+        # warm so a later turn gets the filter back.
         if _model_override is not None:
             model = _model_override
         else:
-            from dct.retrieval.vec_index import _get_model
-            model = _get_model()
+            from dct.retrieval.vec_index import get_model_if_ready
+            model = get_model_if_ready()
+            if model is None:
+                _log.info("[relevance] embedding model not warm — skipping "
+                          "cosine filter this turn (background warm kicked)")
+                return hits, 0
 
         seeds = [h for h in hits if h.hop == 0]
         non_seeds = [h for h in hits if h.hop != 0]
@@ -469,4 +477,13 @@ def query_cosine_filter(
 
     except Exception as exc:
         _log.warning("[relevance] query_cosine_filter failed, skipping: %s", exc)
+        if "meta tensor" in str(exc):
+            # Poisoned model from a raced construction — clear it so the
+            # next background warm builds a clean one (2026-07-16).
+            try:
+                from dct.retrieval.vec_index import reset_model
+                reset_model()
+                _log.warning("[relevance] cleared poisoned embedding model")
+            except Exception:  # noqa: BLE001
+                pass
         return hits, 0

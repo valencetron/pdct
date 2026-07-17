@@ -81,3 +81,57 @@ def test_capture_passes_when_events_present(tmp_path, monkeypatch):
     # at least one leg non-empty → the check passes.
     assert ev_lines == 1
     assert not (n_src == 0 and ev_lines == 0 and n_md == 0)
+
+
+# ── Build: configurable capture source (voice → telegram) ──────────────────
+
+def test_capture_source_default_is_telegram(monkeypatch):
+    monkeypatch.delenv("PDCT_CAPTURE_SOURCE", raising=False)
+    importlib.reload(config)
+    assert config.capture_source() == "telegram"
+
+
+def test_capture_source_env_override(monkeypatch):
+    monkeypatch.setenv("PDCT_CAPTURE_SOURCE", "voice")
+    importlib.reload(config)
+    assert config.capture_source() == "voice"
+
+
+def test_capture_source_invalid_falls_back(monkeypatch):
+    monkeypatch.setenv("PDCT_CAPTURE_SOURCE", "bogus")
+    importlib.reload(config)
+    assert config.capture_source() == "telegram"
+
+
+def test_scheduler_binds_capture_source(tmp_path, monkeypatch):
+    monkeypatch.delenv("PDCT_CAPTURE_SOURCE", raising=False)
+    importlib.reload(config)
+    import dct.scheduler as sched
+    importlib.reload(sched)
+    assert sched.CAPTURE_SOURCE == config.capture_source() == "telegram"
+
+
+def test_scheduler_passes_source_to_cli(tmp_path, monkeypatch):
+    # dct.ingest has NO run_ingest symbol, so scheduler's import always
+    # fails → it uses the CLI subprocess path. Assert the source reaches argv.
+    monkeypatch.setenv("PDCT_CAPTURE_SOURCE", "telegram")
+    monkeypatch.setenv("PDCT_HOME", str(tmp_path))
+    importlib.reload(config)
+    import dct.scheduler as sched
+    importlib.reload(sched)
+    import subprocess
+    seen = {}
+
+    class _Proc:
+        returncode = 0
+        stderr = ""
+
+    def _fake_run(argv, *a, **k):
+        seen["argv"] = argv
+        return _Proc()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    sched._ingest_transcripts(quiet=True)
+    argv = seen["argv"]
+    assert "--source" in argv
+    assert argv[argv.index("--source") + 1] == "telegram"

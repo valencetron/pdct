@@ -31,18 +31,25 @@ _BODY_HEAD_CHARS = 1200
 # bge models want this prefix on the query side only.
 _QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
-_MODEL: Any = None
 _MEM_CACHE: dict[str, Any] = {}  # {"ids": [...], "vecs": ndarray, "stamp": {...}}
 
 
 def _get_model() -> Any:
     # Share the singleton with vec_index — both load BAAI/bge-small-en-v1.5.
-    # Previously each module held its own copy (2x RAM, 2x ~3s load).
-    global _MODEL
-    if _MODEL is None:
-        from dct.retrieval.vec_index import _get_model as _shared
-        _MODEL = _shared()
-    return _MODEL
+    # NO local caching (Codex P1 2026-07-16): holding our own reference
+    # would keep serving a poisoned model after vec_index.reset_model()
+    # cleared it. Delegating per call is a dict lookup — free.
+    # Non-blocking: semantic scoring is an optional channel on the request
+    # path — raising here lands in callers' fail-open except blocks; a ~6s
+    # in-request model load must never happen (it blew the 3s cascade
+    # budget on every turn for 24h+).
+    from dct.retrieval.vec_index import get_model_if_ready
+    model = get_model_if_ready()
+    if model is None:
+        raise RuntimeError(
+            "embedding model not warm — background warm kicked; "
+            "semantic channel skipped this turn")
+    return model
 
 
 def _doc_text(ref: DistillationRef) -> str:

@@ -37,6 +37,7 @@ import os as _os
 # dir inside PDCT_HOME that install.sh scaffolds — never a phantom default
 # path that made the scheduler silently ingest nothing.
 TRANSCRIPTS_GLOB = _cfg.transcripts_glob()
+CAPTURE_SOURCE = _cfg.capture_source()
 
 
 def _emit(msg: str, *, quiet: bool) -> None:
@@ -44,8 +45,9 @@ def _emit(msg: str, *, quiet: bool) -> None:
         print(f"[scheduler {time.strftime('%I:%M %p')}] {msg}", file=sys.stderr, flush=True)
 
 
-def _ingest_voice(*, quiet: bool) -> int:
-    """Ingest voice transcripts. Returns number of events appended (best-effort)."""
+def _ingest_transcripts(*, quiet: bool) -> int:
+    """Ingest transcripts with the configured capture source. Returns number
+    of events appended (best-effort)."""
     try:
         from dct.ingest import run_ingest  # type: ignore
     except ImportError:
@@ -55,15 +57,15 @@ def _ingest_voice(*, quiet: bool) -> int:
         # Prefer direct call when available
         try:
             count = run_ingest(
-                source="voice",
+                source=CAPTURE_SOURCE,
                 input_glob=TRANSCRIPTS_GLOB,
                 log_path=EVENTS_JSONL,
                 dedupe=True,
             )
-            _emit(f"voice ingest: +{count} events", quiet=quiet)
+            _emit(f"{CAPTURE_SOURCE} ingest: +{count} events", quiet=quiet)
             return int(count or 0)
         except Exception as e:
-            _emit(f"voice ingest (direct) failed: {e}", quiet=quiet)
+            _emit(f"{CAPTURE_SOURCE} ingest (direct) failed: {e}", quiet=quiet)
 
     # Fallback — shell out to the CLI
     import subprocess
@@ -71,7 +73,7 @@ def _ingest_voice(*, quiet: bool) -> int:
         proc = subprocess.run(
             [
                 sys.executable, "-m", "dct.ingest",
-                "--source", "voice",
+                "--source", CAPTURE_SOURCE,
                 "--input", TRANSCRIPTS_GLOB,
                 "--log", str(EVENTS_JSONL),
                 "--dedupe",
@@ -79,13 +81,16 @@ def _ingest_voice(*, quiet: bool) -> int:
             capture_output=True, text=True, timeout=120,
         )
         if proc.returncode != 0:
-            _emit(f"voice ingest CLI rc={proc.returncode} stderr={proc.stderr[-200:]}", quiet=quiet)
+            _emit(f"{CAPTURE_SOURCE} ingest CLI rc={proc.returncode} stderr={proc.stderr[-200:]}", quiet=quiet)
             return 0
-        _emit(f"voice ingest: ok", quiet=quiet)
+        _emit(f"{CAPTURE_SOURCE} ingest: ok", quiet=quiet)
         return 0
     except subprocess.TimeoutExpired:
-        _emit("voice ingest: timeout (120s)", quiet=quiet)
+        _emit(f"{CAPTURE_SOURCE} ingest: timeout (120s)", quiet=quiet)
         return 0
+
+
+_ingest_voice = _ingest_transcripts  # legacy alias
 
 
 def _distill_pending(*, limit: int, model: str, quiet: bool) -> dict[str, int]:
@@ -135,11 +140,11 @@ def main() -> int:
     start = time.time()
     _emit("run start", quiet=args.quiet)
 
-    # 1. Ingest voice transcripts
+    # 1. Ingest transcripts
     try:
-        _ingest_voice(quiet=args.quiet)
+        _ingest_transcripts(quiet=args.quiet)
     except Exception as e:
-        _emit(f"voice ingest crashed: {e}", quiet=args.quiet)
+        _emit(f"{CAPTURE_SOURCE} ingest crashed: {e}", quiet=args.quiet)
 
     # 2. Distill pending
     try:

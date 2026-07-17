@@ -87,6 +87,19 @@ JSON files here and the pipeline starts working.** No transcripts = empty
 vault (this is what `pdct doctor` flags as an advisory `capture.source`
 warning; it is not an error).
 
+## Transcript shape
+
+Orion surfaces (daemon, terminal, GUI) emit files named
+`<surface>_<session>.messages.json`, each a JSON array of turns:
+
+    [
+      {"role": "user", "content": "..."},
+      {"role": "assistant", "content": "..."}
+    ]
+
+PDCT ingests these with the `telegram` adapter (`PDCT_CAPTURE_SOURCE=telegram`,
+the default). Drop compatible JSON here and the pipeline starts working.
+
 ## Change or add a source
 
 Point PDCT at your own transcript directory instead (or in addition) by
@@ -135,6 +148,9 @@ export PDCT_HOME="$PDCT_HOME_DIR"
 # \$PDCT_HOME/transcripts/*.json (a real dir; see its README.md for format).
 # Uncomment to point at your own stack's transcript dir instead:
 # export PDCT_TRANSCRIPTS_GLOB="\$HOME/my-stack/transcripts/*.json"
+# Capture source: which adapter parses transcripts. Orion emits
+# telegram-shaped *.messages.json, so telegram is the default.
+# export PDCT_CAPTURE_SOURCE="telegram"
 # Point at an existing Obsidian vault instead (optional):
 # export OBSIDIAN_VAULT="\$HOME/Documents/MyVault"
 # LLM provider (distiller/judge; retrieval works without any LLM).

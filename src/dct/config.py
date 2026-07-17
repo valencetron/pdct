@@ -63,6 +63,22 @@ def transcripts_glob() -> str:
     return str(pdct_home() / "transcripts" / "*.json")
 
 
+def capture_source() -> str:
+    """Which stream adapter the scheduler ingests transcripts with.
+
+    Precedence: PDCT_CAPTURE_SOURCE env (validated) > default "telegram".
+    Valid values are derived from EventSource (single source of truth — no
+    drift). An invalid env value falls back to "telegram" rather than
+    failing late in the scheduler with a silent no-ingest.
+    """
+    from dct.events import EventSource
+    valid = {s.value for s in EventSource}
+    v = os.environ.get("PDCT_CAPTURE_SOURCE")
+    if v in valid:
+        return v
+    return "telegram"
+
+
 def runtime_dir() -> Path:
     return _env_path("PDCT_RUNTIME_DIR") or pdct_home() / "runtime"
 

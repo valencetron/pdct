@@ -16,29 +16,104 @@ distinguishing PDCT from HippoRAG/GraphRAG's purely co-occurrence graphs.
 """
 from __future__ import annotations
 
+import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
 _MODEL: Any = None
 _MODEL_NAME = "BAAI/bge-small-en-v1.5"
+_MODEL_LOCK = threading.Lock()
+_WARM_THREAD: threading.Thread | None = None
+_log = logging.getLogger(__name__)
 
 
 def _get_model() -> Any:
-    """Lazy-load the embedding model (singleton per process)."""
+    """Load the embedding model (singleton per process). BLOCKING — only
+    warmers and offline/batch callers should use this; request-path code
+    uses get_model_if_ready() instead.
+
+    Construction is serialized by _MODEL_LOCK and validated with a probe
+    encode before caching. Root cause 2026-07-16: torch 2.8 + s-t 5.1.2
+    model construction is NOT thread-safe — concurrent constructions all
+    fail with "Cannot copy out of meta tensor" (reproduced 6/6). The
+    unlocked singleton let daemon warmer + request threads race, so the
+    model never loaded and every PDCT cascade timed out for 24h+.
+    """
     global _MODEL
-    if _MODEL is None:
-        try:
-            from sentence_transformers import SentenceTransformer
+    if _MODEL is not None:
+        return _MODEL
+    with _MODEL_LOCK:
+        if _MODEL is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as e:
+                raise ImportError(
+                    "sentence-transformers not installed. "
+                    "Run: .venv/bin/pip install sentence-transformers"
+                ) from e
             # device="cpu": MPS backend deadlocks (_pthread_cond_wait on the
             # Metal GPU stream) on long multi-query runs — observed 2026-06-11.
-            _MODEL = SentenceTransformer(_MODEL_NAME, device="cpu")
-        except ImportError as e:
-            raise ImportError(
-                "sentence-transformers not installed. "
-                "Run: .venv/bin/pip install sentence-transformers"
-            ) from e
-    return _MODEL
+            model = SentenceTransformer(_MODEL_NAME, device="cpu")
+            # Validate BEFORE caching: a raced/partial construction fails
+            # here (meta tensor) instead of poisoning the singleton.
+            model.encode(["warmup"], normalize_embeddings=True,
+                         show_progress_bar=False)
+            _MODEL = model
+        return _MODEL
+
+
+def get_model_if_ready() -> Any | None:
+    """Request-path accessor: return the warm model or None. NEVER
+    constructs, never blocks. On a miss, kicks a background warm so the
+    model becomes available for subsequent turns without any request
+    paying the ~6s construction cost inside the 3s cascade budget."""
+    if _MODEL is not None:
+        return _MODEL
+    ensure_warm_async()
+    return None
+
+
+_WARM_SPAWN_LOCK = threading.Lock()
+_WARM_FAIL_TS = 0.0
+_WARM_FAIL_COOLDOWN_S = 60.0
+
+
+def ensure_warm_async() -> None:
+    """Debounced background warm — at most one loader thread alive (spawn
+    check is locked, Codex P2), with a cooldown after a failed warm so a
+    request burst can't serially retry expensive construction."""
+    global _WARM_THREAD, _WARM_FAIL_TS
+    if _MODEL is not None:
+        return
+    import time as _time
+    with _WARM_SPAWN_LOCK:
+        if _MODEL is not None:
+            return
+        if _WARM_THREAD is not None and _WARM_THREAD.is_alive():
+            return
+        if _time.time() - _WARM_FAIL_TS < _WARM_FAIL_COOLDOWN_S:
+            return
+        def _warm():
+            global _WARM_FAIL_TS
+            try:
+                _get_model()
+                _log.info("[vec_index] background model warm complete")
+            except Exception as e:  # noqa: BLE001
+                _WARM_FAIL_TS = _time.time()
+                _log.warning("[vec_index] background model warm failed: %s", e)
+        t = threading.Thread(target=_warm, name="vec-index-warm", daemon=True)
+        _WARM_THREAD = t
+        t.start()
+
+
+def reset_model() -> None:
+    """Clear a poisoned singleton (e.g. meta-tensor encode failure) so the
+    next warm constructs fresh. Safe to call from any thread."""
+    global _MODEL
+    with _MODEL_LOCK:
+        _MODEL = None
 
 
 def _parse_distillation(path: Path) -> tuple[list[str], str]:
