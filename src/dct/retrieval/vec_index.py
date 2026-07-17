@@ -116,6 +116,14 @@ def reset_model() -> None:
         _MODEL = None
 
 
+# Incremental VEC_NEAR embedding cache: path -> ((mtime_ns, size),
+# primary_concept|None, vector|None). ~1,900 files × 384 float32 ≈ 3MB.
+# Guarded by a lock because rebuilds now run in background threads
+# (service stale-while-revalidate).
+_VEC_EDGE_CACHE: dict[str, tuple[tuple, str | None, Any]] = {}
+_VEC_EDGE_CACHE_LOCK = threading.Lock()
+
+
 def _parse_distillation(path: Path) -> tuple[list[str], str]:
     """Extract (concepts, body_text) from a distillation markdown file.
 
@@ -182,32 +190,64 @@ def build_vec_near_edges(
     except ImportError:
         return []  # numpy not available — fail open
 
-    # Collect distillations with at least one concept
-    items: list[tuple[str, str]] = []  # (primary_concept, embed_text)
-    for f in vault_root.rglob("*.md"):
-        concepts, body = _parse_distillation(f)
-        if not concepts:
-            continue
-        primary = concepts[0]
-        # Embed text: concept slugs joined + first 512 chars of body
-        embed_text = " ".join(concepts) + " " + body[:512]
-        items.append((primary, embed_text))
+    # Incremental (2026-07-16): per-file (mtime → primary, vector) cache.
+    # Previously every rebuild re-read AND re-embedded all ~1,900 vault
+    # files (tens of seconds); now only new/changed files are parsed and
+    # embedded. Files with no concepts cache a tombstone so they aren't
+    # re-read every pass. Deleted files drop out via the seen-set sweep.
+    with _VEC_EDGE_CACHE_LOCK:
+        cache = _VEC_EDGE_CACHE
+        seen: set[str] = set()
+        to_embed: list[tuple[str, tuple, str, str]] = []  # (path, stamp, primary, text)
+        for f in vault_root.rglob("*.md"):
+            try:
+                fst = f.stat()
+            except OSError:
+                continue
+            # (mtime_ns, size): float st_mtime can't distinguish writes
+            # within one timestamp tick on coarse filesystems (Codex P2).
+            mt = (fst.st_mtime_ns, fst.st_size)
+            p = str(f)
+            seen.add(p)
+            hit = cache.get(p)
+            if hit is not None and hit[0] == mt:
+                continue  # unchanged — reuse cached primary/vector (or tombstone)
+            concepts, body = _parse_distillation(f)
+            if not concepts:
+                cache[p] = (mt, None, None)  # tombstone: parsed, nothing to embed
+                continue
+            primary = concepts[0]
+            # Embed text: concept slugs joined + first 512 chars of body
+            embed_text = " ".join(concepts) + " " + body[:512]
+            to_embed.append((p, mt, primary, embed_text))
 
-    if len(items) < 2:
+        if to_embed:
+            try:
+                model = _get_model()
+                new_vecs = model.encode(
+                    [t for _, _, _, t in to_embed],
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                )
+            except Exception:
+                # fail open — VEC_NEAR is additive; serve whatever the cache
+                # already holds rather than nothing.
+                new_vecs = None
+            if new_vecs is not None:
+                for (p, mt, primary, _), v in zip(to_embed, new_vecs):
+                    cache[p] = (mt, primary, np.asarray(v, dtype=np.float32))
+        # Sweep deletions and materialize the live set.
+        for p in list(cache.keys()):
+            if p not in seen:
+                del cache[p]
+        live = [(prim, vec) for (_, prim, vec) in cache.values()
+                if prim is not None and vec is not None]
+
+    if len(live) < 2:
         return []
-
-    try:
-        model = _get_model()
-        texts = [t for _, t in items]
-        vecs = model.encode(
-            texts,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-        )
-        vecs = np.array(vecs, dtype=np.float32)
-    except Exception:
-        return []  # fail open — VEC_NEAR is additive, not required for correctness
+    items = [(prim, None) for prim, _ in live]
+    vecs = np.stack([vec for _, vec in live]).astype(np.float32)
 
     # Cosine similarity matrix (vecs are L2-normalised → dot product = cosine)
     sims = vecs @ vecs.T  # shape (N, N)

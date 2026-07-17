@@ -35,6 +35,7 @@ import os
 import pickle
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -209,18 +210,73 @@ def _filter_by_heat(
     return out, pre_count
 
 
+# Stale-while-revalidate (2026-07-16): the newest built graph per stable
+# identity (events_path, topic, flags), served instantly on a cache miss
+# while a single-flight background thread rebuilds. Root cause: every
+# distillation write bumps vault_mtime and invalidates the cache, and a
+# full rebuild (re-parse + re-embed the vault) can take tens of seconds —
+# on an active day nearly every turn was a miss, blowing the daemon's 3s
+# cascade budget on every reply (100% cascade_timeout, 2026-07-16).
+# A minutes-stale graph is fine for memory jogging; a blown budget is not.
+_GRAPH_LATEST: dict[tuple, tuple[tuple, ConceptGraph]] = {}
+_GRAPH_LATEST_MAX = 16  # bound: topic_id is caller-supplied, so unbounded
+                        # retention of full graphs is a real leak (Codex P1)
+# stable_key -> live rebuild Thread. A dict (not a flag set) so tests and
+# diagnostics can JOIN in-flight rebuilds — an unjoined worker outliving
+# its context caused real cross-test state pollution (2026-07-16).
+_GRAPH_REBUILDING: dict[tuple, threading.Thread] = {}
+_GRAPH_REBUILD_LOCK = threading.Lock()
+# Per-identity locks so simultaneous COLD requests coalesce into one
+# synchronous build instead of duplicating a full parse+embed (Codex P2).
+_FIRST_BUILD_LOCKS: dict[tuple, threading.Lock] = {}
+
+# Compound cache mutations (clear-then-set, evict loops) from background
+# threads must not interleave with each other (Codex P2). Single writes
+# and reads stay lock-free — a racy read is at worst a cache miss.
+_CACHE_WRITE_LOCK = threading.Lock()
+
+# Vault-mtime scan is ~1,900 stat() calls and ran on EVERY graph lookup —
+# even cache hits paid it. A 15s TTL delays cache invalidation by at most
+# 15s, well inside stale-while-revalidate tolerance (2026-07-16).
+_VAULT_MTIME_CACHE = {"checked": 0.0, "val": 0.0}
+_VAULT_MTIME_TTL_S = 15.0
+
+
+def _vault_mtime_cached() -> float:
+    now = time.time()
+    if now - _VAULT_MTIME_CACHE["checked"] < _VAULT_MTIME_TTL_S:
+        return _VAULT_MTIME_CACHE["val"]
+    try:
+        val = max(
+            (f.stat().st_mtime for f in DISTILL_ROOT.rglob("*.md") if f.is_file()),
+            default=0.0,
+        )
+    except OSError:
+        val = 0.0
+    _VAULT_MTIME_CACHE["checked"] = now
+    _VAULT_MTIME_CACHE["val"] = val
+    return val
+
+
 def _load_or_build_graph(
     events_path: Path | None = None,
     *,
     topic_id: str | None = None,
     ignore_feedback: bool = False,
 ) -> ConceptGraph:
-    """Return ConceptGraph from in-memory cache or rebuild on staleness.
+    """Return ConceptGraph from in-memory cache, a stale-while-revalidate
+    fallback, or a synchronous first build.
 
     R3.2: cache is in-memory only, keyed by
         (cache_version, events_path, mtime, topic_id, ignore_feedback)
     so different topics and ablation arms each get their own graph without
     collision. Process restart = cold rebuild.
+
+    Stale-while-revalidate (2026-07-16): on a cache miss where THIS stable
+    identity has a previously built graph, that graph is returned
+    immediately and a single-flight daemon thread rebuilds fresh in the
+    background. Only the first-ever build per identity blocks (bounded by
+    the daemon's cascade timeout wrapper).
 
     R3.5 fix: events_path defaults to None and resolves to module-level
     EVENTS_JSONL at call time. Late binding lets tests monkeypatch the
@@ -238,21 +294,102 @@ def _load_or_build_graph(
     # vault mtime so ablation toggles and new distillations invalidate the cache.
     vec_near_flag = _env_bool("DCT_VEC_NEAR_ENABLED", True)
     vec_near_thresh = _env_float("DCT_VEC_NEAR_THRESHOLD", 0.70)
-    try:
-        vault_mtime = max(
-            (f.stat().st_mtime for f in DISTILL_ROOT.rglob("*.md") if f.is_file()),
-            default=0.0,
-        )
-    except OSError:
-        vault_mtime = 0.0
+    vault_mtime = _vault_mtime_cached()
     key = (
         _CACHE_VERSION, str(events_path), mtime, topic_id, ignore_feedback,
         vec_near_flag, vec_near_thresh, vault_mtime,
     )
+    stable_key = (str(events_path), topic_id, ignore_feedback,
+                  vec_near_flag, vec_near_thresh)
     cached = _GRAPH_CACHE.get(key)
     if cached is not None:
         return cached
 
+    # Cache miss. If this identity has ANY previously built graph, serve it
+    # stale and refresh in the background — never block a turn on a rebuild.
+    latest = _GRAPH_LATEST.get(stable_key)
+    if latest is not None:
+        _kick_background_rebuild(key, stable_key, events_path,
+                                 topic_id=topic_id,
+                                 ignore_feedback=ignore_feedback,
+                                 vec_near_flag=vec_near_flag,
+                                 vec_near_thresh=vec_near_thresh)
+        return latest[1]
+
+    # First-ever build for this identity: synchronous (bounded upstream by
+    # the daemon's cascade timeout wrapper; the abandoned worker still
+    # completes and populates the caches for the next turn). Per-identity
+    # lock: simultaneous cold requests coalesce — the second waits, then
+    # returns the first's result instead of duplicating a full build.
+    with _GRAPH_REBUILD_LOCK:
+        fb_lock = _FIRST_BUILD_LOCKS.setdefault(stable_key, threading.Lock())
+    with fb_lock:
+        cached = _GRAPH_CACHE.get(key)
+        if cached is not None:
+            return cached
+        latest = _GRAPH_LATEST.get(stable_key)
+        if latest is not None:
+            return latest[1]
+        return _build_graph_now(key, stable_key, events_path,
+                                topic_id=topic_id,
+                                ignore_feedback=ignore_feedback,
+                                vec_near_flag=vec_near_flag,
+                                vec_near_thresh=vec_near_thresh)
+
+
+def _kick_background_rebuild(key, stable_key, events_path, *,
+                             topic_id, ignore_feedback,
+                             vec_near_flag, vec_near_thresh) -> bool:
+    """Single-flight: spawn at most one rebuild thread per stable identity.
+    Returns True if a thread was spawned."""
+    with _GRAPH_REBUILD_LOCK:
+        existing = _GRAPH_REBUILDING.get(stable_key)
+        if existing is not None and existing.is_alive():
+            return False
+
+        def _rebuild():
+            try:
+                _build_graph_now(key, stable_key, events_path,
+                                 topic_id=topic_id,
+                                 ignore_feedback=ignore_feedback,
+                                 vec_near_flag=vec_near_flag,
+                                 vec_near_thresh=vec_near_thresh)
+                _log.info("[graph_swr] background rebuild complete tk=%s",
+                          topic_id)
+            except Exception as e:  # noqa: BLE001 — stale graph keeps serving
+                _log.warning("[graph_swr] background rebuild failed tk=%s: %s",
+                             topic_id, e)
+            finally:
+                with _GRAPH_REBUILD_LOCK:
+                    _GRAPH_REBUILDING.pop(stable_key, None)
+
+        t = threading.Thread(target=_rebuild, name="graph-swr-rebuild",
+                             daemon=True)
+        _GRAPH_REBUILDING[stable_key] = t
+        t.start()
+        return True
+
+
+def join_rebuilds(timeout: float = 10.0) -> None:
+    """Block until all in-flight background rebuilds — graph AND heat —
+    finish. Used by tests (an unjoined worker crossing a test boundary
+    polluted module state) and available for graceful shutdown."""
+    with _GRAPH_REBUILD_LOCK:
+        threads = list(_GRAPH_REBUILDING.values()) + list(_HEAT_REBUILDING.values())
+    for t in threads:
+        t.join(timeout=timeout)
+
+
+def _build_graph_now(key, stable_key, events_path, *,
+                     topic_id, ignore_feedback,
+                     vec_near_flag, vec_near_thresh) -> ConceptGraph:
+    """Full graph build + cache write. Runs synchronously on first build,
+    in a daemon thread on stale-while-revalidate refreshes.
+
+    vec_near_flag/thresh are the values CAPTURED into the cache key by the
+    caller — never re-read from env here, or a mid-flight env change would
+    store a graph under a key describing a different configuration
+    (Codex P1)."""
     log = EventLog(events_path)
     graph = build_concept_graph(
         log, topic_id=topic_id, ignore_feedback=ignore_feedback,
@@ -260,28 +397,36 @@ def _load_or_build_graph(
 
     # Track C Claim 3: add VEC_NEAR edges if enabled.
     # DCT_VEC_NEAR_ENABLED=false disables (ablation arm).
-    vec_near_enabled = _env_bool("DCT_VEC_NEAR_ENABLED", True)
-    if vec_near_enabled:
+    if vec_near_flag:
         try:
             from dct.retrieval.vec_index import build_vec_near_edges
             from dataclasses import replace as _dc_replace
-            vec_threshold = _env_float("DCT_VEC_NEAR_THRESHOLD", 0.70)
-            vec_edges = build_vec_near_edges(DISTILL_ROOT, threshold=vec_threshold)
+            vec_edges = build_vec_near_edges(DISTILL_ROOT,
+                                             threshold=vec_near_thresh)
             if vec_edges:
                 new_typed = list(graph.typed_edges) + vec_edges
                 graph = _dc_replace(graph, typed_edges=new_typed)
                 _log.info(
                     "[vec_near] added %d VEC_NEAR edges (threshold=%.2f)",
-                    len(vec_edges), vec_threshold,
+                    len(vec_edges), vec_near_thresh,
                 )
         except Exception as e:
             _log.warning("[vec_near] build failed (non-fatal): %s", e)
 
     # Bound the cache so a long-lived process doesn't accumulate every
-    # historical (mtime, topic) tuple forever.
-    if len(_GRAPH_CACHE) > 32:
-        _GRAPH_CACHE.clear()
-    _GRAPH_CACHE[key] = graph
+    # historical (mtime, topic) tuple forever. Compound mutations under the
+    # cache write lock (background threads must not interleave evictions).
+    with _CACHE_WRITE_LOCK:
+        if len(_GRAPH_CACHE) > 32:
+            _GRAPH_CACHE.clear()
+        _GRAPH_CACHE[key] = graph
+        # Latest-per-identity for stale-while-revalidate. pop+set keeps dict
+        # insertion order = recency; evict oldest beyond the bound (topic_id
+        # is caller-supplied — unbounded retention was a leak, Codex P1).
+        _GRAPH_LATEST.pop(stable_key, None)
+        _GRAPH_LATEST[stable_key] = (key, graph)
+        while len(_GRAPH_LATEST) > _GRAPH_LATEST_MAX:
+            _GRAPH_LATEST.pop(next(iter(_GRAPH_LATEST)))
 
     # Emit a "rebuild" event so metric_graph_staleness can track graph activity.
     # This fires on every cache-miss build — which is exactly "the graph was rebuilt."
@@ -297,13 +442,44 @@ def _load_or_build_graph(
                 "topic_id": topic_id,
             },
         }
-        EVENTS_JSONL.parent.mkdir(parents=True, exist_ok=True)
-        with EVENTS_JSONL.open("a", encoding="utf-8") as _ef:
+        # Telemetry goes to the SAME log this graph was built from — writing
+        # to the module-global path while building from a caller-supplied
+        # one mutated an unrelated log (Codex P2).
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        with events_path.open("a", encoding="utf-8") as _ef:
             _ef.write(json.dumps(rebuild_event, separators=(",", ":")) + "\n")
+        # SELF-INVALIDATION FIX (2026-07-16, caught by test_graph_swr): this
+        # append just changed the events mtime — the cache entry stored
+        # above is already stale by its own key, so every build kicked
+        # another build, forever. Re-stat and ALSO store under the
+        # post-append key. (A real event landing in this tiny window gets
+        # masked for one serve — acceptable under stale-while-revalidate.)
+        try:
+            post_mtime = events_path.stat().st_mtime
+            post_key = key[:2] + (post_mtime,) + key[3:]
+            if post_key != key:
+                # MOVE (not duplicate): the pre-append key can never match
+                # a future caller's stat once the append changed the mtime.
+                with _CACHE_WRITE_LOCK:
+                    _GRAPH_CACHE.pop(key, None)
+                    _GRAPH_CACHE[post_key] = graph
+                    _GRAPH_LATEST.pop(stable_key, None)
+                    _GRAPH_LATEST[stable_key] = (post_key, graph)
+        except OSError:
+            pass
     except Exception as _e:
         _log.warning("[graph_rebuild] failed to emit rebuild event: %s", _e)
 
     return graph
+
+
+# Heat stale-while-revalidate (2026-07-16, same pattern as the graph):
+# events.jsonl appends EVERY turn, so the mtime-keyed heat cache missed on
+# nearly every call and recomputed a full 34MB/90k-event replay (~0.75-2s)
+# inside the 3s cascade budget. A snapshot one refresh old is fine for a
+# ranking filter whose cache already tolerated 30s buckets.
+_HEAT_LATEST: dict[tuple, dict[str, float]] = {}
+_HEAT_REBUILDING: dict[tuple, threading.Thread] = {}
 
 
 def _load_or_build_heat(
@@ -312,8 +488,9 @@ def _load_or_build_heat(
     ts: float,
     half_life: float,
 ) -> dict[str, float]:
-    """Return heat snapshot from cache or fresh compute. Cache invalidated by
-    events.jsonl mtime change OR ts_bucket roll (every 30s)."""
+    """Return heat snapshot from cache, a stale-while-revalidate fallback,
+    or a synchronous first compute. Cache invalidated by events.jsonl mtime
+    change OR ts_bucket roll (every 30s)."""
     try:
         mtime = events_path.stat().st_mtime
     except OSError:
@@ -323,10 +500,68 @@ def _load_or_build_heat(
     cached = _HEAT_CACHE.get(key)
     if cached is not None:
         return cached
+
+    stable_key = (str(events_path), half_life)
+    latest = _HEAT_LATEST.get(stable_key)
+    if latest is not None:
+        # Recompute at the CALLER's ts, not wall-clock — a historical-ts
+        # request must never receive (or cache) heat evaluated at real time
+        # (Codex P1: decay results differ).
+        _kick_heat_recompute(key, stable_key, events_path,
+                             ts=ts, half_life=half_life)
+        return latest
+
+    # Cold start coalesces like the graph's first build (Codex P1):
+    # simultaneous first requests must not each replay the 34MB log.
+    with _GRAPH_REBUILD_LOCK:
+        fb_lock = _FIRST_BUILD_LOCKS.setdefault(("heat",) + stable_key,
+                                                threading.Lock())
+    with fb_lock:
+        cached = _HEAT_CACHE.get(key)
+        if cached is not None:
+            return cached
+        latest = _HEAT_LATEST.get(stable_key)
+        if latest is not None:
+            return latest
+        return _compute_heat_now(key, stable_key, events_path,
+                                 ts=ts, half_life=half_life)
+
+
+def _kick_heat_recompute(key, stable_key, events_path, *, ts, half_life) -> bool:
+    """Single-flight background heat recompute (mirrors graph SWR)."""
+    with _GRAPH_REBUILD_LOCK:
+        existing = _HEAT_REBUILDING.get(stable_key)
+        if existing is not None and existing.is_alive():
+            return False
+
+        def _recompute():
+            try:
+                _compute_heat_now(key, stable_key, events_path,
+                                  ts=ts, half_life=half_life)
+            except Exception as e:  # noqa: BLE001 — stale heat keeps serving
+                _log.warning("[heat_swr] background recompute failed: %s", e)
+            finally:
+                with _GRAPH_REBUILD_LOCK:
+                    _HEAT_REBUILDING.pop(stable_key, None)
+
+        t = threading.Thread(target=_recompute, name="heat-swr-recompute",
+                             daemon=True)
+        _HEAT_REBUILDING[stable_key] = t
+        t.start()
+        return True
+
+
+def _compute_heat_now(key, stable_key, events_path, *, ts, half_life
+                      ) -> dict[str, float]:
     heat = compute_heat_at(events_path, ts=ts, half_life=half_life)
-    if len(_HEAT_CACHE) > 32:
-        _HEAT_CACHE.clear()
-    _HEAT_CACHE[key] = heat
+    with _CACHE_WRITE_LOCK:
+        if len(_HEAT_CACHE) > 32:
+            _HEAT_CACHE.clear()
+        _HEAT_CACHE[key] = heat
+        _HEAT_LATEST.pop(stable_key, None)
+        _HEAT_LATEST[stable_key] = heat
+        while len(_HEAT_LATEST) > _GRAPH_LATEST_MAX:
+            _HEAT_LATEST.pop(next(iter(_HEAT_LATEST)))
     return heat
 
 
@@ -552,9 +787,16 @@ def run(
     ts = now if now is not None else time.time()
     config = config_override if config_override is not None else build_config()
 
+    # Per-stage wall-clock (latency campaign Phase A, 2026-07-16): the 3s
+    # cascade budget was blown for months with no visibility into WHICH
+    # stage ate it. One compact log line + stage_ms in the result.
+    _stage_ms: dict[str, int] = {}
+    _t_stage = time.time()
+
     graph = _load_or_build_graph(
         topic_id=topic_id, ignore_feedback=ignore_feedback,
     )
+    _stage_ms["graph"] = int((time.time() - _t_stage) * 1000)
     # seeds_override (conversational cascade, build #-): when the caller supplies
     # an explicit seed list (e.g. derived seeds ∪ warm activated concepts from
     # prior turns), use it verbatim instead of re-deriving from user_text alone.
@@ -569,7 +811,11 @@ def run(
     else:
         seed_concepts = _derive_seeds(user_text, graph)
 
+    _t_stage = time.time()
     bundle = preload(config, now=ts)
+    _stage_ms["preload"] = int((time.time() - _t_stage) * 1000)
+
+    _t_stage = time.time()
     raw_hits = cascade(
         seed_concepts=seed_concepts,
         graph=graph,
@@ -577,6 +823,8 @@ def run(
         config=config,
         current_context=set(current_context or []),
     )
+    _stage_ms["cascade"] = int((time.time() - _t_stage) * 1000)
+    _t_stage = time.time()
 
     # ── Heat filter (fail-open + insufficient-data guard) ──
     heat_skipped_reason = "none"
@@ -609,6 +857,8 @@ def run(
             warm_hits = raw_hits
             pre_heat_count = len(raw_hits)
             heat_skipped_reason = "compute_error"
+
+    _stage_ms["heat"] = int((time.time() - _t_stage) * 1000)
 
     # ── Eligibility filter (P1.1 junk-concept blocklist) ──
     # Drop non-seed concepts the scorer would mark INELIGIBLE so injection
@@ -690,11 +940,16 @@ def run(
     prompt_block = format_for_telegram(bundle, hits)
     cascade_paths = {h.concept: list(h.path) for h in hits if h.path}
 
+    _stage_ms["total"] = int((time.time() - ts) * 1000) if now is None else -1
+    _log.info("[cascade timing] %s",
+              " ".join(f"{k}={v}ms" for k, v in _stage_ms.items()))
+
     # Seed-count breakdown for telemetry (Codex round 1 #3).
     explicit_seeds = list(extract(user_text))
     explicit_seed_set = set(explicit_seeds)
     return {
         "prompt_block": prompt_block,
+        "stage_ms": _stage_ms,
         "seed_concepts": seed_concepts,
         "explicit_seed_count": sum(1 for s in seed_concepts if s in explicit_seed_set),
         "prose_seed_count": sum(1 for s in seed_concepts if s not in explicit_seed_set),

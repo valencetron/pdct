@@ -14,7 +14,7 @@ import pytest
 
 from dct.retrieval.preload import (
     _load_all_distilled,
-    _DISTILL_CACHE,
+    _reset_note_cache,
     preload,
 )
 from dct.retrieval.types import RetrievalConfig
@@ -84,7 +84,7 @@ def _write_archive_file(
 
 def test_load_all_distilled_picks_up_archive_root(tmp_path):
     """Files in archive_roots are loaded alongside distill_root files."""
-    _DISTILL_CACHE.clear()
+    _reset_note_cache()
 
     distill_root = tmp_path / "distill"
     distill_root.mkdir()
@@ -109,7 +109,7 @@ def test_load_all_distilled_picks_up_archive_root(tmp_path):
 
 def test_load_all_distilled_merges_distill_and_archive(tmp_path):
     """Notes from both distill_root and archive_root are merged and sorted newest-first."""
-    _DISTILL_CACHE.clear()
+    _reset_note_cache()
 
     distill_root = tmp_path / "distill"
     distill_root.mkdir()
@@ -148,7 +148,7 @@ def test_load_all_distilled_merges_distill_and_archive(tmp_path):
 
 def test_load_all_distilled_missing_archive_root_is_skipped(tmp_path):
     """A non-existent archive_root does not crash — it's simply skipped."""
-    _DISTILL_CACHE.clear()
+    _reset_note_cache()
 
     distill_root = tmp_path / "distill"
     distill_root.mkdir()
@@ -165,8 +165,17 @@ def test_load_all_distilled_missing_archive_root_is_skipped(tmp_path):
 
 
 def test_load_all_distilled_cache_invalidated_by_new_archive_file(tmp_path):
-    """Cache is invalidated when a new archive file is written."""
-    _DISTILL_CACHE.clear()
+    """A new archive file is picked up after the scan TTL expires.
+
+    Contract change (2026-07-16 latency campaign): the old design promised
+    immediate visibility by keying the cache on max-mtime — which meant
+    every write forced a full re-read+re-parse of every note (observed
+    1.9-14.4s inside the cascade). The new incremental cache serves the
+    last list with zero I/O inside a 15s TTL and re-parses ONLY changed
+    files on expiry. ≤15s staleness for "today/recent" context is the
+    accepted trade."""
+    from dct.retrieval.preload import _NOTE_LIST
+    _reset_note_cache()
 
     distill_root = tmp_path / "distill"
     distill_root.mkdir()
@@ -184,10 +193,26 @@ def test_load_all_distilled_cache_invalidated_by_new_archive_file(tmp_path):
     notes = _load_all_distilled(cfg)
     assert len(notes) == 0
 
-    # Write a new archive file (changes dir mtime)
+    # Write a new archive file.
     _write_archive_file(archive_root, compacted_at="2026-05-21T10:00:00Z", gist="Post-write gist.")
 
-    # Second load — must pick up the new file (cache invalidated by mtime change)
+    # Within the TTL the cached (stale) list is served with NO scan at all
+    # (scanner monkeypatched to explode — Codex P2: assert the contract,
+    # not just the return value).
+    import dct.retrieval.preload  # the module, not the shadowing function
+    import sys
+    pl = sys.modules["dct.retrieval.preload"]
+    real_scan = pl._scan_notes
+    def _boom(cfg_):
+        raise AssertionError("scan must not run inside the TTL")
+    pl._scan_notes = _boom
+    try:
+        assert _load_all_distilled(cfg) == []
+    finally:
+        pl._scan_notes = real_scan
+
+    # After TTL expiry the scan sees the new file (only it gets parsed).
+    _NOTE_LIST["checked_mono"] = float("-inf")
     notes2 = _load_all_distilled(cfg)
     assert len(notes2) == 1
     assert notes2[0].gist == "Post-write gist."
@@ -199,7 +224,7 @@ def test_load_all_distilled_cache_invalidated_by_new_archive_file(tmp_path):
 
 def test_preload_injects_archive_gist_into_today(tmp_path, anchor_dir):
     """preload() includes today's archive files in today_summaries."""
-    _DISTILL_CACHE.clear()
+    _reset_note_cache()
 
     distill_root = tmp_path / "distill"
     distill_root.mkdir()
@@ -226,7 +251,7 @@ def test_preload_injects_archive_gist_into_today(tmp_path, anchor_dir):
 
 def test_preload_injects_archive_gist_into_recent(tmp_path, anchor_dir):
     """preload() includes older archive files in recent_summaries."""
-    _DISTILL_CACHE.clear()
+    _reset_note_cache()
 
     distill_root = tmp_path / "distill"
     distill_root.mkdir()
@@ -279,7 +304,7 @@ def test_live_archive_root_smoke(tmp_path):
     if not archive_files:
         pytest.skip(f"ARCHIVE_ROOT is empty: {ARCHIVE_ROOT}")
 
-    _DISTILL_CACHE.clear()
+    _reset_note_cache()
 
     # Use an empty tmp distill_root so all notes come exclusively from the archive.
     cfg = RetrievalConfig(

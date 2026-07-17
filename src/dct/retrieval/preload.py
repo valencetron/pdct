@@ -1,5 +1,7 @@
 """Preload — assemble session-start context bundle."""
 from __future__ import annotations
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -82,69 +84,106 @@ def _parse_distilled(path: Path) -> DistilledNote | None:
     )
 
 
-# In-memory cache for the full distillation list, invalidated by distill_root
-# directory mtime. A new compaction writes a new file → dir mtime changes →
-# next request rebuilds. Cache cleared when it exceeds 8 entries (shouldn't
-# happen in practice — key is stable across a daemon run).
-_DISTILL_CACHE: dict[tuple, list[DistilledNote]] = {}
+# Incremental per-file note cache (2026-07-16 latency campaign): the old
+# design keyed a whole-list cache on the max-mtime across every root — any
+# distillation/archive write invalidated it, and a miss re-read AND
+# re-parsed every .md file (~2-3k with archives, observed 1.9-14.4s inside
+# the cascade). Computing the key itself rglob-stat'ed everything per call.
+# Now: a 15s TTL serves the last list with ZERO I/O; on expiry a single
+# stat-walk re-parses only new/changed files and sweeps deletions.
+_NOTE_CACHE: dict[str, tuple[tuple, "DistilledNote | None"]] = {}
+# checked_mono uses time.monotonic() — wall-clock (NTP/manual) rollback must
+# not extend the TTL (Codex P1).
+_NOTE_LIST = {"checked_mono": float("-inf"), "fast_key": (), "notes": []}
+_NOTE_LOCK = threading.Lock()
+_NOTE_SCANNING = {"active": False}
+_NOTE_SCAN_TTL_S = 15.0
+import logging as _logging
+_plog = _logging.getLogger(__name__)
 
 
-def _distill_root_mtime(root: Path) -> float:
-    """Max mtime of any .md file under root, for cache invalidation."""
-    try:
-        return max(
-            (p.stat().st_mtime for p in root.rglob("*.md") if p.is_file()),
-            default=0.0,
-        )
-    except OSError:
-        return 0.0
+def _reset_note_cache() -> None:
+    """Test/tooling helper: drop all cached notes and force a fresh scan
+    (replaces the old `_DISTILL_CACHE.clear()` reset)."""
+    with _NOTE_LOCK:
+        _NOTE_CACHE.clear()
+        _NOTE_LIST["checked_mono"] = float("-inf")
+        _NOTE_LIST["fast_key"] = ()
+        _NOTE_LIST["notes"] = []
+
+
+def _scan_notes(config: RetrievalConfig) -> list[DistilledNote]:
+    """Full stat-walk + incremental parse. Runs OUTSIDE _NOTE_LOCK (Codex
+    P1: holding a global lock through filesystem walking + YAML parsing
+    stalls every concurrent caller). Single-scanner is guaranteed by the
+    _NOTE_SCANNING flag; results publish atomically under the lock."""
+    all_roots = [config.distill_root] + list(config.archive_roots)
+    active_roots = [r for r in all_roots if r.is_dir()]
+    new_cache: dict[str, tuple[tuple, "DistilledNote | None"]] = {}
+    changed = 0
+    for root in active_roots:
+        for p in root.rglob("*.md"):
+            try:
+                fst = p.stat()
+            except OSError:
+                continue
+            if not p.is_file():
+                continue
+            key = str(p)
+            stamp = (fst.st_mtime_ns, fst.st_size)
+            hit = _NOTE_CACHE.get(key)
+            if hit is not None and hit[0] == stamp:
+                new_cache[key] = hit  # unchanged — reuse without re-reading
+                continue
+            new_cache[key] = (stamp, _parse_distilled(p))
+            changed += 1
+    if changed:
+        _plog.debug("[preload] note scan: %d changed of %d files",
+                    changed, len(new_cache))
+    notes = [n for _, n in new_cache.values() if n is not None]
+    notes.sort(key=lambda n: n.distilled_at, reverse=True)
+    with _NOTE_LOCK:
+        _NOTE_CACHE.clear()
+        _NOTE_CACHE.update(new_cache)  # deletions sweep implicitly
+    return notes
 
 
 def _load_all_distilled(config: RetrievalConfig) -> list[DistilledNote]:
-    """Load all distilled notes from distill_root + archive_roots, newest first.
+    """All distilled notes from distill_root + archive_roots, newest first.
 
-    FIX (2026-05-27): The original _load_distilled() looked for surface-named
-    subdirectories (voice/, claude-code/, telegram/, vault/) that never existed.
-    All 589+ distillations live at distill_root/<slug>/<slug>.md with a flat
-    `source: telegram-dispatch daemon` field — no surface split. This function
-    walks distill_root/**/*.md directly and sorts by distilled_at (which maps
-    to compacted_at in the frontmatter).
+    FIX (2026-05-27): walks distill_root/**/*.md directly (surface-named
+    subdirectories never existed). Phase 2 (2026-05-28): also walks
+    config.archive_roots; archives share the frontmatter schema.
 
-    Phase 2 (2026-05-28): also walks config.archive_roots (e.g.
-    vault/compaction-archive/ written by compaction_archive.py). Archive files
-    share the same frontmatter schema (compacted_at, gist) so _parse_distilled
-    handles them without modification.
-
-    Results are cached in-process, invalidated by combined max-mtime across all
-    roots so a fresh archive write is picked up on the next request.
+    Incremental + stale-while-scanning (2026-07-16): inside a 15s TTL the
+    last list serves with no filesystem access at all (the fast key is
+    built from configured path strings, not is_dir() probes — Codex P2).
+    On expiry exactly one caller scans (stat-walk, re-parse only changed
+    files); concurrent callers serve the stale list instead of queueing
+    behind the scan. ≤15s staleness is the accepted trade for
+    "today/recent" session context.
     """
-    all_roots = [config.distill_root] + [r for r in config.archive_roots if r.is_dir()]
-    active_roots = [r for r in all_roots if r.is_dir()]
-    if not active_roots:
-        return []
-
-    # Cache key: tuple of (root_str, mtime) for every active root, sorted for stability.
-    mtime_parts = tuple(
-        (str(r), _distill_root_mtime(r)) for r in sorted(active_roots, key=str)
-    )
-    cached = _DISTILL_CACHE.get(mtime_parts)
-    if cached is not None:
-        return cached
-
-    notes: list[DistilledNote] = []
-    for root in active_roots:
-        for p in root.rglob("*.md"):
-            if not p.is_file():
-                continue
-            n = _parse_distilled(p)
-            if n is not None:
-                notes.append(n)
-    notes.sort(key=lambda n: n.distilled_at, reverse=True)
-
-    if len(_DISTILL_CACHE) > 8:
-        _DISTILL_CACHE.clear()
-    _DISTILL_CACHE[mtime_parts] = notes
-    return notes
+    fast_key = (str(config.distill_root),
+                tuple(str(r) for r in config.archive_roots))
+    now_m = time.monotonic()
+    with _NOTE_LOCK:
+        same_key = _NOTE_LIST["fast_key"] == fast_key
+        if same_key and now_m - _NOTE_LIST["checked_mono"] < _NOTE_SCAN_TTL_S:
+            return _NOTE_LIST["notes"]
+        if same_key and _NOTE_SCANNING["active"]:
+            # A scan is in flight — serve stale rather than queue behind it.
+            return _NOTE_LIST["notes"]
+        _NOTE_SCANNING["active"] = True
+    try:
+        notes = _scan_notes(config)
+        with _NOTE_LOCK:
+            _NOTE_LIST["checked_mono"] = time.monotonic()
+            _NOTE_LIST["fast_key"] = fast_key
+            _NOTE_LIST["notes"] = notes
+        return notes
+    finally:
+        with _NOTE_LOCK:
+            _NOTE_SCANNING["active"] = False
 
 
 # -- today / recent split ------------------------------------------------------

@@ -422,7 +422,11 @@ def test_run_disabled_via_env(monkeypatch):
 
 
 def test_load_or_build_heat_invalidates_on_mtime_change(tmp_path, monkeypatch):
-    """Same ts bucket but events file mutated → cache must recompute."""
+    """Same ts bucket but events file mutated → miss serves STALE instantly
+    (stale-while-revalidate, 2026-07-16) and a background recompute lands a
+    fresh snapshot for subsequent calls. The old contract (immediate fresh
+    compute on the request path) is intentionally superseded: a full
+    events.jsonl replay (~1-2s) blew the 3s cascade budget on every turn."""
     from dct.retrieval import service as svc
 
     events_path = tmp_path / "events.jsonl"
@@ -438,8 +442,10 @@ def test_load_or_build_heat_invalidates_on_mtime_change(tmp_path, monkeypatch):
         return {f"slug_{len(text)}": 0.5}
 
     monkeypatch.setattr(svc, "compute_heat_at", fake_compute)
-    # Clear cache for clean state.
-    svc._HEAT_CACHE.clear()
+    # Clear all heat state for a clean run.
+    monkeypatch.setattr(svc, "_HEAT_CACHE", {})
+    monkeypatch.setattr(svc, "_HEAT_LATEST", {})
+    monkeypatch.setattr(svc, "_HEAT_REBUILDING", {})
 
     ts = 12345.0  # fixed ts → same bucket for both calls
     h1 = svc._load_or_build_heat(events_path, ts=ts, half_life=21600.0)
@@ -448,9 +454,17 @@ def test_load_or_build_heat_invalidates_on_mtime_change(tmp_path, monkeypatch):
     _t.sleep(0.01)  # ensure mtime granularity advances on filesystems with second-level precision
     events_path.write_text("MUTATED\n")
     h2 = svc._load_or_build_heat(events_path, ts=ts, half_life=21600.0)
+    assert h2 is h1, "miss must serve the stale snapshot instantly"
 
-    assert h1 != h2, "mtime change should invalidate cache; got cached stale result"
-    assert len(calls) == 2, f"expected 2 fresh computes, got {len(calls)}"
+    # Background recompute observes the mutation and lands a fresh snapshot.
+    deadline = _t.time() + 5
+    while len(calls) < 2 and _t.time() < deadline:
+        _t.sleep(0.02)
+    assert len(calls) == 2, f"expected background recompute, got {len(calls)}"
+    while svc._HEAT_REBUILDING and _t.time() < deadline:
+        _t.sleep(0.02)
+    h3 = svc._load_or_build_heat(events_path, ts=ts + 60, half_life=21600.0)
+    assert h3 != h1, "fresh snapshot must serve after the recompute lands"
 
 
 def test_load_or_build_heat_caches_within_bucket(tmp_path, monkeypatch):
