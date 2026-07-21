@@ -859,6 +859,7 @@ def run(
             heat_skipped_reason = "compute_error"
 
     _stage_ms["heat"] = int((time.time() - _t_stage) * 1000)
+    _t_stage = time.time()
 
     # ── Eligibility filter (P1.1 junk-concept blocklist) ──
     # Drop non-seed concepts the scorer would mark INELIGIBLE so injection
@@ -870,6 +871,9 @@ def run(
     # eligible_hits — otherwise eligibility telemetry mixes in relevance
     # drops (Codex r2 P2 #3).
     post_eligibility_count = len(eligible_hits)
+
+    _stage_ms["eligibility"] = int((time.time() - _t_stage) * 1000)
+    _t_stage = time.time()
 
     # ── Relevance filter (v0 — time-and-surface-aware policy) ──
     relevance_rule_id = ""
@@ -917,6 +921,9 @@ def run(
             relevance_rule_id = ""
             relevance_dropped_count = 0
 
+    _stage_ms["relevance"] = int((time.time() - _t_stage) * 1000)
+    _t_stage = time.time()
+
     # ── Query-adaptive cosine filter (v1) ──
     # Drops cascade hits whose embedding is semantically unrelated to the user
     # query. Runs after all rule-based filters; seeds (hop=0) always survive.
@@ -936,10 +943,17 @@ def run(
         except Exception as _e:
             _log.warning("[cosine] filter integration failed, skipping: %s", _e)
 
+    # Cosine filter cost (embedding encode) was the largest historically
+    # un-instrumented stage — 2026-07-17 saw totals 2-4x the sum of the
+    # named stages, all hidden in this filter chain. Timers close that gap.
+    _stage_ms["cosine"] = int((time.time() - _t_stage) * 1000)
+    _t_stage = time.time()
+
     hits, pre_trim_count = _trim_hits(eligible_hits, config)
     prompt_block = format_for_telegram(bundle, hits)
     cascade_paths = {h.concept: list(h.path) for h in hits if h.path}
 
+    _stage_ms["format"] = int((time.time() - _t_stage) * 1000)
     _stage_ms["total"] = int((time.time() - ts) * 1000) if now is None else -1
     _log.info("[cascade timing] %s",
               " ".join(f"{k}={v}ms" for k, v in _stage_ms.items()))
