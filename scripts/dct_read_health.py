@@ -250,6 +250,49 @@ def apply_stage_verdicts(verdict: str | None, model: dict,
     return "DEGRADED" if soft_bad else verdict
 
 
+WARMUP_S = 600  # daemon uptime below this → cascade timings are cold-start
+                # noise; bad verdicts neutralized to None (no alert, no heal)
+DAEMON_SOCK = "/tmp/valence-daemon.sock"
+
+
+def daemon_uptime_s() -> float | None:
+    """Uptime via socket op:health; None = unreachable (no warm-up grace —
+    an unreachable daemon must still be reportable as BROKEN)."""
+    import socket as _socket
+    try:
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(2.0)
+        s.connect(DAEMON_SOCK)
+        s.sendall(json.dumps({"op": "health"}).encode())
+        s.shutdown(_socket.SHUT_WR)
+        chunks = []
+        while True:
+            c = s.recv(65536)
+            if not c:
+                break
+            chunks.append(c)
+        s.close()
+        return float(json.loads(b"".join(chunks).decode())["uptime_s"])
+    except Exception:
+        return None
+
+
+def effective_verdict(verdict: str | None) -> str | None:
+    """Neutralize bad verdicts measured against a warming daemon (H1,
+    2026-07-17: post-restart cold caches produced 18-27s preloads that
+    read as BROKEN, triggering heal restarts that re-created the cold
+    start — the churn loop). HEALTHY passes through: good news is good
+    news even during warm-up. One probe tick of blindness max; the next
+    tick sees a warm daemon."""
+    if verdict in ("BROKEN", "DEGRADED"):
+        up = daemon_uptime_s()
+        if up is not None and up < WARMUP_S:
+            print(f"[read-health] verdict={verdict} neutralized: daemon "
+                  f"warming (uptime {up:.0f}s < {WARMUP_S}s)", file=sys.stderr)
+            return None
+    return verdict
+
+
 def verdict_for(stats: dict) -> str | None:
     """BROKEN / DEGRADED / HEALTHY, or None when there's too little signal."""
     if stats.get("error"):
@@ -389,6 +432,7 @@ def main() -> None:
     # Stages escalate the verdict — a failing stage is a read-side problem
     # even when the turn window is too quiet for a cascade verdict.
     verdict = apply_stage_verdicts(verdict, model, ev_age)
+    verdict = effective_verdict(verdict)  # H1 warm-up grace (None → early return below)
 
     print(f"[read-health] stats={stats} model={model} events_age={ev_age} "
           f"verdict={verdict} prev={prev.get('verdict')}", file=sys.stderr)
