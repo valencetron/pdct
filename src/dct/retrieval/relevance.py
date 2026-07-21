@@ -380,6 +380,13 @@ def _effective_floor(policy: RelevancePolicy, base: float) -> float:
 # Query-adaptive cosine filter (v1)
 # ---------------------------------------------------------------------------
 
+# Cosine circuit breaker state: after one slow encode, skip the filter
+# (fail open) until the cool-off passes. monotonic — wall-clock immune.
+_COSINE_BREAKER = {"until_mono": 0.0}
+COSINE_SLOW_S = 1.5      # an encode slower than this trips the breaker
+COSINE_COOLOFF_S = 1800  # skip window after a trip
+
+
 def query_cosine_filter(
     user_text: str,
     hits: list[ConceptHit],
@@ -421,6 +428,17 @@ def query_cosine_filter(
     if not user_text or len(user_text.strip()) < 10:
         return hits, 0
 
+    # Circuit breaker (2026-07-17 22:50 PT): in-daemon, encode() ran 3-18s
+    # under worker contention (42ms standalone) and single-handedly blew the
+    # 4.5s cascade budget on 24 consecutive turns. The filter is an
+    # optimization — dropping it costs a few noisy hits; keeping it cost
+    # every PDCT read. After a slow encode, fail open for COSINE_COOLOFF_S
+    # so at most one turn per window pays. Real fix (precomputed concept
+    # vectors off the turn path) is carded: cascade-eater-fix-630aac.
+    import time as _time
+    if _time.monotonic() < _COSINE_BREAKER["until_mono"]:
+        return hits, 0
+
     try:
         import numpy as _np
 
@@ -456,10 +474,20 @@ def query_cosine_filter(
             text = slug_words if not h.snippet else slug_words + " " + h.snippet[:200]
             concept_texts.append(text)
 
-        # Embed query + all concept texts in one batch call.
+        # Embed query + all concept texts in one batch call. Time it: a
+        # slow encode trips the breaker so later turns fail open instead
+        # of blowing the cascade budget (see breaker comment above).
         all_texts = [user_text.strip()] + concept_texts
+        _t_enc = _time.monotonic()
         all_vecs = model.encode(all_texts, normalize_embeddings=True,
                                 show_progress_bar=False)
+        _enc_s = _time.monotonic() - _t_enc
+        if _enc_s > COSINE_SLOW_S:
+            _COSINE_BREAKER["until_mono"] = _time.monotonic() + COSINE_COOLOFF_S
+            _log.warning(
+                "[cosine] encode took %.1fs (> %.1fs) — breaker tripped, "
+                "filter fails open for %dmin", _enc_s, COSINE_SLOW_S,
+                COSINE_COOLOFF_S // 60)
         query_vec = all_vecs[0]
         concept_vecs = all_vecs[1:]
 
