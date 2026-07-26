@@ -384,7 +384,58 @@ def _effective_floor(policy: RelevancePolicy, base: float) -> float:
 # (fail open) until the cool-off passes. monotonic — wall-clock immune.
 _COSINE_BREAKER = {"until_mono": 0.0}
 COSINE_SLOW_S = 1.5      # an encode slower than this trips the breaker
-COSINE_COOLOFF_S = 1800  # skip window after a trip
+# Exile window after a slow encode. Shortened 1800->300 (WS1 Phase 1): with
+# the concept-embedding cache, per-turn encode is query-only (~10ms warm
+# out-of-process microbench), so a trip is now rare AND recovery shouldn't
+# cost 30 min. The breaker stays a safety net; the residual risk is a slow
+# query encode under daemon contention, which the live battery measures and
+# the Phase-2 read service ultimately removes.
+COSINE_COOLOFF_S = 300
+
+
+def _concept_store():
+    """Indirection so tests can inject a temp store via monkeypatch."""
+    from dct.retrieval.concept_embeddings import default_store
+    return default_store()
+
+
+def _encode_query(text: str):
+    """Off-process query encode via the embed service (WS1 Phase 2).
+
+    Returns a validated 384-vec, or None on ANY failure so the caller falls
+    back to the in-process model.encode (never worse than Phase 1). Indirection
+    kept so tests can monkeypatch it without a live socket."""
+    from dct.retrieval.embed_client import encode_query
+    return encode_query(text)
+
+
+class _ConceptEncodeUnavailable(Exception):
+    """Both the off-process embed service and the in-process model are
+    unavailable — the cosine filter must fail open (skip) this turn."""
+
+
+class _OffProcConceptEncoder:
+    """model-like shim passed to ConceptStore.get_many: encodes concept-text
+    cache misses via the off-process embed service (batch), falling back to a
+    pre-resolved in-process model only if the service is unreachable. Keeps the
+    last in-process bge encode off the contended daemon (2026-07-22). Vectors are
+    identical to the in-process encode (same model + normalization), so grounding
+    is score-identical — only the process doing the math changes."""
+    __slots__ = ("_fallback",)
+
+    def __init__(self, fallback):
+        self._fallback = fallback  # in-proc model, or None if not warm
+
+    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False):
+        from dct.retrieval.embed_client import encode_texts
+        vecs = encode_texts(list(texts))
+        if vecs is not None:
+            return vecs
+        if self._fallback is not None:
+            return self._fallback.encode(
+                list(texts), normalize_embeddings=normalize_embeddings,
+                show_progress_bar=show_progress_bar)
+        raise _ConceptEncodeUnavailable()
 
 
 def query_cosine_filter(
@@ -446,50 +497,74 @@ def query_cosine_filter(
         if _model_override == "__RAISE__":
             raise RuntimeError("simulated model failure")
 
-        # Use the already-loaded singleton from vec_index. NEVER construct
-        # here: this runs inside the 3s cascade budget and the model load is
-        # ~6s (2026-07-16 root cause — every cascade timed out for 24h+).
-        # Not-warm → fail open immediately; the accessor kicks a background
-        # warm so a later turn gets the filter back.
-        if _model_override is not None:
-            model = _model_override
-        else:
-            from dct.retrieval.vec_index import get_model_if_ready
-            model = get_model_if_ready()
-            if model is None:
-                _log.info("[relevance] embedding model not warm — skipping "
-                          "cosine filter this turn (background warm kicked)")
-                return hits, 0
-
         seeds = [h for h in hits if h.hop == 0]
         non_seeds = [h for h in hits if h.hop != 0]
 
         if not non_seeds:
             return hits, 0
 
-        # Build concept text: slug words + snippet if available.
-        concept_texts = []
-        for h in non_seeds:
-            slug_words = h.concept.replace("-", " ")
-            text = slug_words if not h.snippet else slug_words + " " + h.snippet[:200]
-            concept_texts.append(text)
+        # Build concept text via the canonical builder (shared with the
+        # warmer so cache identity can't drift — WS1 Phase 1, 2026-07-21).
+        from dct.retrieval.concept_embeddings import concept_text as _ctext
+        concept_texts = [_ctext(h.concept, h.snippet) for h in non_seeds]
+        store = _concept_store()
 
-        # Embed query + all concept texts in one batch call. Time it: a
-        # slow encode trips the breaker so later turns fail open instead
-        # of blowing the cascade budget (see breaker comment above).
-        all_texts = [user_text.strip()] + concept_texts
+        # Off-process query encode FIRST (WS1 Phase 2, Codex #2). The dedicated
+        # embed service encodes the fresh query in a contention-free process, so
+        # in steady state (service up + every concept cached) this turn loads NO
+        # local model at all — the ~1.7s in-daemon residual is structurally
+        # gone. A local model is resolved ONLY when actually needed: the service
+        # was unavailable (query must fall back to in-proc encode) OR some
+        # concept text is a cache miss and must be encoded here.
+        query_vec = _encode_query(user_text.strip())  # None on any failure
+
+        if _model_override is not None:
+            model = _model_override
+        elif query_vec is not None and not store.missing_texts(concept_texts):
+            # Steady state: query served off-proc, all concepts cached — the
+            # local model is genuinely unnecessary this turn. Do NOT touch it.
+            model = None
+        else:
+            # Concept-cache miss (or the query off-proc encode failed). Encode
+            # the misses via the off-process embed service too, resolving the
+            # in-process model ONLY as a fallback for when the service is down
+            # (2026-07-22: this was the last in-process bge encode on the turn
+            # path, ~1.4s under contention). NEVER construct the model here — the
+            # load is ~6s and would blow the cascade budget; get_model_if_ready
+            # returns None when cold, and then the off-proc service carries the
+            # turn (a strict improvement: turns that used to skip now run).
+            from dct.retrieval.vec_index import get_model_if_ready
+            model = _OffProcConceptEncoder(fallback=get_model_if_ready())
+
+        # Concept texts are STABLE → served from the content-addressed cache
+        # (encoding only genuine misses via the resolved local model). The fresh
+        # query was encoded off-proc above; only if the service was down does it
+        # fall back to the local model here. Breaker timing wraps the whole
+        # lookup+encode (Phase 1 semantics preserved) — off-proc it is a sub-ms
+        # socket round trip and won't trip in steady state.
         _t_enc = _time.monotonic()
-        all_vecs = model.encode(all_texts, normalize_embeddings=True,
-                                show_progress_bar=False)
+        try:
+            concept_vecs = store.get_many(concept_texts, model=model)
+            if query_vec is None:
+                query_vec = model.encode(
+                    [user_text.strip()], normalize_embeddings=True,
+                    show_progress_bar=False)[0]
+        except _ConceptEncodeUnavailable:
+            _log.info("[relevance] embed service down and model not warm — "
+                      "skipping cosine filter this turn (background warm kicked)")
+            return hits, 0
         _enc_s = _time.monotonic() - _t_enc
         if _enc_s > COSINE_SLOW_S:
             _COSINE_BREAKER["until_mono"] = _time.monotonic() + COSINE_COOLOFF_S
             _log.warning(
-                "[cosine] encode took %.1fs (> %.1fs) — breaker tripped, "
+                "[cosine] encode+lookup took %.1fs (> %.1fs) — breaker tripped, "
                 "filter fails open for %dmin", _enc_s, COSINE_SLOW_S,
                 COSINE_COOLOFF_S // 60)
-        query_vec = all_vecs[0]
-        concept_vecs = all_vecs[1:]
+        # NB (Codex diff r1 P0/P1): the daemon NEVER writes the store on the
+        # turn path. A per-turn save() was a full 44MB NPZ rewrite off the
+        # breaker's clock AND raced the nightly warmer across processes. Misses
+        # here are cached in-memory only (helps later in-process turns); the
+        # nightly warmer is the SOLE authoritative disk writer.
 
         # Cosine similarity (L2-normalised → dot product = cosine).
         kept = []

@@ -17,8 +17,10 @@ Graceful: any failure returns the prior ordering unchanged.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import threading
+from collections import OrderedDict
 from typing import Any
 
 # L-12 swap 2026-06-12: cold canary r@1 0.40→0.667, r@5 0.833→0.933,
@@ -106,10 +108,50 @@ def reset_model() -> None:
     global _MODEL
     with _MODEL_LOCK:
         _MODEL = None
+    reset_cache()  # scores from the cleared model must not persist
 
 
 def _sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
+
+
+# --- cross-encoder result cache ------------------------------------------
+# The CE is deterministic (eval mode, CPU): identical (query, pair_text) ->
+# identical raw logit. Memoizing the RAW predict output -- before the pool-
+# relative sigmoid/min-max-normalize/blend, which stay downstream and
+# unchanged -- lets repeat (query, doc) pairs skip inference while keeping the
+# reranked result byte-identical. Bounded LRU keyed by a 128-bit hash of
+# query+text (entries stay small regardless of doc length). Batching is
+# preserved: only cache-miss pairs are sent to model.predict, in one call.
+_CE_CACHE: "OrderedDict[bytes, float]" = OrderedDict()
+_CE_CACHE_LOCK = threading.Lock()
+_CE_CACHE_MAX = 50_000
+# Bumped whenever the cache is cleared / model is reset. A rerank() that began
+# before a reset must not write its (now pre-reset-model) logits into the fresh
+# cache, so it re-checks the generation before inserting.
+_CE_GENERATION = 0
+
+
+def _ce_cache_key(query: str, pair_text: str) -> bytes:
+    # Length-prefix the query so the query/text boundary is unambiguous even if
+    # either contains NUL bytes -- otherwise ("a","b\0c") and ("a\0b","c") would
+    # hash equal and reuse a score for the wrong pair.
+    qb = query.encode("utf-8", "ignore")
+    tb = pair_text.encode("utf-8", "ignore")
+    h = hashlib.blake2b(digest_size=16)
+    h.update(len(qb).to_bytes(8, "big"))
+    h.update(qb)
+    h.update(tb)
+    return h.digest()
+
+
+def reset_cache() -> None:
+    """Clear the CE result cache and bump the generation (invalidates any
+    in-flight rerank's pending insert). Called on model reset/swap."""
+    global _CE_GENERATION
+    with _CE_CACHE_LOCK:
+        _CE_CACHE.clear()
+        _CE_GENERATION += 1
 
 
 def rerank(
@@ -134,7 +176,38 @@ def rerank(
             return fallback  # not warm yet — never construct on request path
         pairs = [(query, text[:1500] if text else cid)
                  for cid, text, _ in candidates]
-        raw = model.predict(pairs, show_progress_bar=False)
+        # Cache-aware CE scoring: reuse cached raw logits for repeat
+        # (query, pair_text) pairs; batch-predict only the misses. Identical
+        # inputs -> identical raw scores, so the reranked output is unchanged.
+        keys = [_ce_cache_key(q, t) for q, t in pairs]
+        raw: list[float] = [0.0] * len(pairs)
+        miss_idx: list[int] = []
+        miss_pairs: list[tuple[str, str]] = []
+        with _CE_CACHE_LOCK:
+            gen = _CE_GENERATION
+            for i, k in enumerate(keys):
+                v = _CE_CACHE.get(k)
+                if v is None:
+                    miss_idx.append(i)
+                    miss_pairs.append(pairs[i])
+                else:
+                    _CE_CACHE.move_to_end(k)
+                    raw[i] = v
+        if miss_pairs:
+            fresh = model.predict(miss_pairs, show_progress_bar=False)
+            with _CE_CACHE_LOCK:
+                # Skip the write if the cache was reset during prediction -- our
+                # logits are from the pre-reset model and must not repopulate it.
+                write = _CE_GENERATION == gen
+                for j, i in enumerate(miss_idx):
+                    val = float(fresh[j])
+                    raw[i] = val
+                    if write:
+                        _CE_CACHE[keys[i]] = val
+                        _CE_CACHE.move_to_end(keys[i])
+                if write:
+                    while len(_CE_CACHE) > _CE_CACHE_MAX:
+                        _CE_CACHE.popitem(last=False)
         # Min-max normalize CE scores within the pool. Raw ms-marco logits
         # sigmoid to tiny absolute values (~0.0002-0.005 on this corpus),
         # which would let the prior term swamp a 20x relative CE preference.

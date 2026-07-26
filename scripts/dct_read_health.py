@@ -55,6 +55,10 @@ HEAL_REQUEST_DIR = (Path.home() / "example-stack" / "tools" / "telegram-dispatch
 # Thresholds (module-level so tests can reference them)
 WINDOW_MIN = 60          # look-back window for the verdict
 MIN_TURNS = 3            # below this, not enough signal — stay quiet
+DEGRADED_MIN_TURNS = 8   # DEGRADED needs a real sample: 1 slow turn in a quiet
+                         # hour is 25-33% and flapped orange alerts all day
+                         # (2026-07-24, 7-restart day). BROKEN keeps MIN_TURNS —
+                         # real breakage must still alarm fast on thin data.
 BROKEN_RATE = 0.50       # >=50% cascade_timeout → BROKEN
 HEALTHY_RATE = 0.20      # <=20% → HEALTHY (hysteresis gap vs BROKEN_RATE)
 REALERT_H = 6.0          # re-alert cadence while broken
@@ -82,10 +86,47 @@ def _parse_ts(ts) -> float | None:
         return None
 
 
-def scan_window(path: Path, window_min: int, now_unix: float) -> dict:
-    """Single tail-pass over measurement.jsonl → read-side stats for the window."""
+RESTART_AUDIT = (Path.home() / "example-stack" / "tools" / "telegram-dispatch"
+                 / "restart-audit.log")
+
+
+def daemon_start_times(now_unix: float, window_min: int) -> list[float]:
+    """Daemon START timestamps recent enough that their warm-up period can
+    overlap the scan window. Unreadable/absent audit → [] (no exclusions —
+    fail conservative, i.e. today's behavior)."""
+    starts: list[float] = []
+    horizon = now_unix - window_min * 60 - WARMUP_S
+    try:
+        for raw in RESTART_AUDIT.read_text(encoding="utf-8",
+                                           errors="ignore").splitlines():
+            try:
+                row = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue  # valid-JSON scalar/array line: ignorable, never fatal
+            if (row.get("target") == "daemon" and row.get("event") == "START"
+                    and isinstance(row.get("ts_unix"), (int, float))
+                    and row["ts_unix"] >= horizon):
+                starts.append(float(row["ts_unix"]))
+    except OSError:
+        return []
+    return starts
+
+
+def scan_window(path: Path, window_min: int, now_unix: float,
+                starts: list[float] | None = None) -> dict:
+    """Single tail-pass over measurement.jsonl → read-side stats for the window.
+
+    Cold-start exemption (2026-07-24): a cascade_timeout landing within
+    WARMUP_S of a daemon START is the restart's cold caches, not read-side
+    failure. The H1 uptime grace already neutralizes verdicts DURING warm-up,
+    but the poisoned row then sat in the 60-min window for an hour afterward,
+    flapping DEGRADED on every restart-heavy day. Such rows are reclassified
+    as 'cold_start' — still visible in the reasons line, no alarm weight."""
     reasons: dict[str, int] = {}
     latencies: list[int] = []
+    starts = starts or []
     try:
         size = path.stat().st_size
         with open(path, "rb") as f:
@@ -103,6 +144,9 @@ def scan_window(path: Path, window_min: int, now_unix: float) -> dict:
                 if t is None or now_unix - t > window_min * 60:
                     continue
                 reason = str(row.get("pdct_skipped_reason") or "unknown")
+                if reason == "cascade_timeout" and any(
+                        0 <= t - s <= WARMUP_S for s in starts):
+                    reason = "cold_start"
                 reasons[reason] = reasons.get(reason, 0) + 1
                 lat = row.get("cascade_latency_ms")
                 if isinstance(lat, (int, float)):
@@ -252,7 +296,7 @@ def apply_stage_verdicts(verdict: str | None, model: dict,
 
 WARMUP_S = 600  # daemon uptime below this → cascade timings are cold-start
                 # noise; bad verdicts neutralized to None (no alert, no heal)
-DAEMON_SOCK = "/tmp/valence-daemon.sock"
+DAEMON_SOCK = "/tmp/orion-daemon.sock"
 
 
 def daemon_uptime_s() -> float | None:
@@ -304,6 +348,10 @@ def verdict_for(stats: dict) -> str | None:
         return "BROKEN"
     if rate <= HEALTHY_RATE:
         return "HEALTHY"
+    # In the degraded band on a thin sample (1 slow turn in a quiet hour),
+    # stay quiet rather than flap orange; BROKEN above alarms at MIN_TURNS.
+    if stats["turns"] < DEGRADED_MIN_TURNS:
+        return None
     return "DEGRADED"
 
 
@@ -409,7 +457,8 @@ def main() -> None:
     args = parser.parse_args()
 
     now_unix = datetime.now(timezone.utc).timestamp()
-    stats = scan_window(MEASUREMENT_JSONL, args.window_min, now_unix)
+    starts = daemon_start_times(now_unix, args.window_min)
+    stats = scan_window(MEASUREMENT_JSONL, args.window_min, now_unix, starts)
     verdict = verdict_for(stats)
     prev = load_state()
 

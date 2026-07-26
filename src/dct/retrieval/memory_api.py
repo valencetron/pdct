@@ -4,9 +4,11 @@ Surface-agnostic: same interface for Telegram, Voice, Claude Code.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,8 +23,29 @@ from dct.retrieval.distill_index import DistillationRef, build_index
 from dct.retrieval.related import RelatedRef, related_distillations
 from dct.retrieval.types import ConceptHit, RetrievalConfig
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ[name]))
+    except (KeyError, ValueError, TypeError):
+        return default
+
+
 _TOP_K = 5
-_RERANK_POOL = 25
+# Cross-encoder candidate-pool sizes, env-overridable so the sweep (and the
+# tuner) can retune them without a code edit. Shipped defaults come from the
+# 2026-07-22 pool sweep: a tighter pool feeds the cross-encoder fewer topical
+# distractors, so recall@1/5 + MRR rose monotonically as the pool shrank across
+# both the 30q canary and 85q questions-v3 sets, while p50 dropped ~28% (the
+# old 65-candidate pool was over-provisioned and actively hurting ranking).
+# 6/4/2/2 is the latency floor and the recall max of the tested range.
+# The prior/scored channel is the primary ranked source (the final pool is
+# sliced to it), so floor it at _TOP_K: a low env override must never starve
+# rerank below the k results it has to return. Supplementary channels may be 0
+# (an explicit "disable this channel"), since the prior floor still guarantees k.
+_RERANK_POOL = max(_TOP_K, _env_int("DCT_RERANK_POOL", 6))  # prior-channel top-N (>= _TOP_K)
+_SEM_POOL = _env_int("DCT_RERANK_SEM", 4)      # dense-semantic top-N (0 disables)
+_TEXT_POOL = _env_int("DCT_RERANK_TEXT", 2)    # text-match top-N (0 disables)
+_BM25_POOL = _env_int("DCT_RERANK_BM25", 2)    # BM25 top-N (0 disables)
 
 
 @dataclass(frozen=True)
@@ -90,6 +113,58 @@ def _concept_match_strength(cascade_concept: str, ref_concept: str) -> float:
     # Single-token overlap on a multi-word concept = weak signal (0.3)
     # Full coverage = strong signal (0.7)
     return 0.3 + (0.4 * coverage)
+
+
+# --- concept inverted index (corpus-independent candidate retrieval) ------
+# _concept_match_strength() returns >0 ONLY when the two concepts share at
+# least one hyphen-token (exact, prefix/suffix, and token-overlap all require
+# it). So indexing every doc concept's tokens (all lengths) plus the full
+# string gives an EXHAUSTIVE candidate superset: any doc that could score >0
+# for a cascade concept shares a token with it and is in the index. Gating the
+# expensive fuzzy match on that candidate set is byte-identical to scanning
+# every doc, but O(candidates) instead of O(N). That removes the DOMINANT
+# corpus-scaling term (the fuzzy match); cheaper O(N) work remains (the per-doc
+# text/recency pass and the semantic/BM25 channels), so latency still grows
+# with corpus, just far more slowly. Built once, cached by corpus stamp.
+_CONCEPT_IDX_LOCK = threading.Lock()
+_concept_idx_cache: dict | None = None  # {stamp, t2d: token -> set(doc ids)}
+
+
+def _concept_tokens(concept: str) -> set[str]:
+    """Match keys for a concept: its hyphen-tokens plus the full string."""
+    toks = set(concept.split("-"))
+    toks.add(concept)
+    return toks
+
+
+def _concept_token_index(index: dict[str, DistillationRef]) -> dict[str, set[str]]:
+    """token -> {doc ids whose concepts contain it}. Cached by corpus stamp."""
+    global _concept_idx_cache
+    # Stamp includes each ref's concepts, not just IDs — so editing a
+    # distillation's frontmatter concepts (same ID, same count) still
+    # invalidates the index instead of serving stale tokens.
+    stamp = (len(index),
+             hash(frozenset((rid, tuple(ref.concepts)) for rid, ref in index.items())))
+    with _CONCEPT_IDX_LOCK:
+        if _concept_idx_cache is None or _concept_idx_cache["stamp"] != stamp:
+            t2d: dict[str, set[str]] = {}
+            for rid, ref in index.items():
+                for rc in ref.concepts:
+                    for tok in _concept_tokens(rc):
+                        t2d.setdefault(tok, set()).add(rid)
+            _concept_idx_cache = {"stamp": stamp, "t2d": t2d}
+        return _concept_idx_cache["t2d"]
+
+
+def _candidate_ids(concept: str, t2d: dict[str, set[str]]) -> set[str]:
+    """Docs sharing >=1 token with `concept` -- a superset of every doc that
+    could fuzzy-match it (see _concept_match_strength)."""
+    out: set[str] = set()
+    for tok in _concept_tokens(concept):
+        docs = t2d.get(tok)
+        if docs:
+            out |= docs
+    return out
 
 
 def _recency_boost(date_str: str) -> float:
@@ -255,10 +330,14 @@ def _aggregate(
     # distillation index (token-overlap counted as a "hit").
     import math
     n_docs = max(len(index), 1)
+    t2d = _concept_token_index(index)
     df: dict[str, int] = {}
     for cc in concept_score:
         count = 0
-        for ref in index.values():
+        for rid in _candidate_ids(cc, t2d):  # only docs sharing a token with cc
+            ref = index.get(rid)
+            if ref is None:
+                continue
             for rc in ref.concepts:
                 if _concept_match_strength(cc, rc) > 0:
                     count += 1
@@ -272,6 +351,16 @@ def _aggregate(
     concept_score = {cc: s * max(idf[cc], 0.05) for cc, s in concept_score.items()}
 
     cascade_concepts = list(concept_score.keys())
+    concept_cands: set[str] = set()  # docs that can fuzzy-match any cascade concept
+    # token -> cascade concepts containing it (B5, 2026-07-23): lets the per-ref
+    # fuzzy loop below score only the cascade concepts that share a token with a
+    # ref concept, instead of all of them. _concept_match_strength is provably 0
+    # without a shared token, so this is byte-identical — ~200x fewer calls.
+    cc_by_token: dict[str, list[str]] = {}
+    for cc in cascade_concepts:
+        concept_cands |= _candidate_ids(cc, t2d)
+        for tok in _concept_tokens(cc):
+            cc_by_token.setdefault(tok, []).append(cc)
     query_dates = _query_dates(query_text)
 
     # Dense semantic channel — covers vocabulary mismatch the concept graph
@@ -287,19 +376,32 @@ def _aggregate(
         if not ref.concepts:
             continue
 
-        # Score each ref concept against cascade hits, weighting by match strength
+        # Score each ref concept against cascade hits, weighting by match
+        # strength -- but only for docs sharing a token with a cascade concept.
+        # Non-candidates provably score 0 (inverted-index gate), so skipping
+        # the fuzzy loop for them is byte-identical, just O(candidates) not O(N).
         weighted_scores: list[float] = []
-        for rc in ref.concepts:
-            best_match = 0.0
-            for cc in cascade_concepts:
-                strength = _concept_match_strength(cc, rc)
-                if strength > 0:
-                    # Combined: cascade score × match strength
-                    combined = concept_score[cc] * strength
-                    if combined > best_match:
-                        best_match = combined
-            if best_match > 0:
-                weighted_scores.append(best_match)
+        if ref.id in concept_cands:
+            for rc in ref.concepts:
+                best_match = 0.0
+                # Only cascade concepts sharing a token with rc can score > 0
+                # (see _concept_match_strength); scan those, not all cascade
+                # concepts. best_match is an order-independent max over the same
+                # >0 pairs, so this is byte-identical (B5, 2026-07-23).
+                seen_cc: set[str] = set()
+                for tok in _concept_tokens(rc):
+                    for cc in cc_by_token.get(tok, ()):
+                        if cc in seen_cc:
+                            continue
+                        seen_cc.add(cc)
+                        strength = _concept_match_strength(cc, rc)
+                        if strength > 0:
+                            # Combined: cascade score × match strength
+                            combined = concept_score[cc] * strength
+                            if combined > best_match:
+                                best_match = combined
+                if best_match > 0:
+                    weighted_scores.append(best_match)
 
         if weighted_scores:
             # Multi-concept overlap: reward distillations matching many concepts
@@ -347,15 +449,23 @@ def _aggregate(
     # misses had semantic rank 1-340 but never made the prior top-25).
     # Union three recall channels so the cross-encoder gets to see every
     # doc any single channel believes in:
-    #   - top _RERANK_POOL by blended prior
-    #   - top 20 by dense semantic cosine
-    #   - top 10 by keyword text match
+    #   - top _RERANK_POOL by blended prior (floored at _TOP_K)
+    #   - top _SEM_POOL by dense semantic cosine
+    #   - top _TEXT_POOL by keyword text match, top _BM25_POOL by BM25
+    # 2026-07-22: pool sizes are env-tunable; defaults trimmed to 6/4/2/2 — a
+    # tighter pool feeds the cross-encoder fewer topical distractors, which
+    # raised recall monotonically across the canary + 85q sets. The semantic
+    # and BM25 channels slice-then-dedup against the prior pool (take top-N,
+    # then drop overlaps), so overlap yields fewer unique extras. That is
+    # intentional: it biases the union *smaller*, matching the finding that a
+    # leaner pool ranks better. Enlarging it (dedup-then-slice) needs its own
+    # sweep — do not "fix" the ordering without one.
     pool = scored[:_RERANK_POOL]
     if query_text:
         pool_ids = {r.id for _, r in pool}
         extras: list[tuple[float, DistillationRef]] = []
         if sem:
-            for cid, _sc in sorted(sem.items(), key=lambda kv: -kv[1])[:20]:
+            for cid, _sc in sorted(sem.items(), key=lambda kv: -kv[1])[:_SEM_POOL]:
                 ref = index.get(cid)
                 if ref is not None and cid not in pool_ids:
                     pool_ids.add(cid)
@@ -363,7 +473,7 @@ def _aggregate(
         tm = sorted(
             ((_text_match_boost(query_text, ref), ref)
              for ref in index.values() if ref.id not in pool_ids),
-            key=lambda t: -t[0])[:10]
+            key=lambda t: -t[0])[:_TEXT_POOL]
         for tb, ref in tm:
             if tb >= 0.10:
                 pool_ids.add(ref.id)
@@ -374,7 +484,7 @@ def _aggregate(
         # remaining canary misses #1 while no other channel pooled them.
         try:
             from dct.retrieval.bm25_index import bm25_top
-            for cid in bm25_top(query_text, index, k=10):
+            for cid in bm25_top(query_text, index, k=_BM25_POOL):
                 ref = index.get(cid)
                 if ref is not None and cid not in pool_ids:
                     pool_ids.add(cid)

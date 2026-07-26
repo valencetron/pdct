@@ -337,15 +337,57 @@ def _load_or_build_graph(
                                 vec_near_thresh=vec_near_thresh)
 
 
+# Rate-limit background graph rebuilds (2026-07-22 latency audit). events.jsonl's
+# mtime is in the cache key and the daemon appends to it EVERY turn, so the key
+# misses every turn and — absent this cap — kicks a full-vault re-embed per turn:
+# a perpetual GIL hog that starved preload + cosine (cosine p50 ~1.7s, breaker
+# tripping 297x, preload spikes to tens of seconds). The 2026-07-16
+# self-invalidation fix only stopped the rebuild's OWN telemetry append from
+# re-arming it; the daemon's per-turn event writes still do. This caps rebuilds
+# to one per interval per identity — the stale graph keeps serving in between (a
+# miss already serves stale), so it changes rebuild *frequency*, never graph
+# content or ranking. Tunable so the sweep/tuner can adjust without a code edit.
+_GRAPH_LAST_REBUILD: dict[tuple, float] = {}   # stable_key -> monotonic kick ts
+# ALL access to _GRAPH_LAST_REBUILD is under _GRAPH_REBUILD_LOCK — never from
+# _build_graph_now's _CACHE_WRITE_LOCK section (a cross-lock touch could drop a
+# stamp mid-rebuild and defeat the cap under topic churn — Codex r1 P1).
+
+
+def _parse_rebuild_interval(raw) -> float:
+    """Parse DCT_GRAPH_REBUILD_MIN_INTERVAL_S. Rejects NaN / inf / negative
+    (which would silently disable the cap or freeze refresh forever) → 300s
+    default. 0 is honoured as an explicit 'no rate-limit' (tests / tuning)."""
+    try:
+        v = float(raw) if raw is not None else 300.0
+    except (TypeError, ValueError):
+        return 300.0
+    return v if 0.0 <= v < float("inf") else 300.0
+
+
+_GRAPH_REBUILD_MIN_INTERVAL_S = _parse_rebuild_interval(
+    os.environ.get("DCT_GRAPH_REBUILD_MIN_INTERVAL_S"))
+
+
 def _kick_background_rebuild(key, stable_key, events_path, *,
                              topic_id, ignore_feedback,
                              vec_near_flag, vec_near_thresh) -> bool:
-    """Single-flight: spawn at most one rebuild thread per stable identity.
-    Returns True if a thread was spawned."""
+    """Single-flight + rate-limited: spawn at most one rebuild thread per stable
+    identity, and at most one rebuild per _GRAPH_REBUILD_MIN_INTERVAL_S. Returns
+    True if a thread was spawned."""
     with _GRAPH_REBUILD_LOCK:
         existing = _GRAPH_REBUILDING.get(stable_key)
         if existing is not None and existing.is_alive():
             return False
+        last = _GRAPH_LAST_REBUILD.get(stable_key)
+        if last is not None and (time.monotonic() - last) < _GRAPH_REBUILD_MIN_INTERVAL_S:
+            return False
+        # Stamp under _GRAPH_REBUILD_LOCK; pop+set keeps recency order and the
+        # bound keeps the map from growing with caller-supplied topic_ids
+        # (mirrors _GRAPH_LATEST; self-contained so no cross-lock eviction).
+        _GRAPH_LAST_REBUILD.pop(stable_key, None)
+        _GRAPH_LAST_REBUILD[stable_key] = time.monotonic()
+        while len(_GRAPH_LAST_REBUILD) > _GRAPH_LATEST_MAX:
+            _GRAPH_LAST_REBUILD.pop(next(iter(_GRAPH_LAST_REBUILD)))
 
         def _rebuild():
             try:
