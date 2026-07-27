@@ -18,6 +18,7 @@ become advisory skips and distillation is disabled.
 | 5 | Event log | `events.jsonl` — the append-only activation record | `config.events` | no |
 | 6 | Runtime dir | writable state dir (pidfiles, overrides, status) | `config.runtime` | yes (`--live`) |
 | 7 | LLM credentials | any provider auth detected (OAuth / API key / endpoint) | `config.credentials` | no |
+| 7b | Anchor budget | always-on anchor files fit under `preload_anchor_cap` (no silent tail truncation) | `config.anchors` | no |
 | 8 | Example corpus | bundled synthetic corpus for sandbox diagnostics | `functional.corpus` | yes |
 | 9 | Index build | distillation index builds from the corpus | `functional.index` | yes |
 | 10 | Event replay + heat | activation engine replays events into concept heat | `functional.replay` | yes |

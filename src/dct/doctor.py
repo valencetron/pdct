@@ -44,7 +44,7 @@ EXAMPLES_DIR = _REPO_ROOT / "examples"
 CHECK_IDS = [
     "env.python",          "env.deps",           "env.optional",
     "config.home",         "config.vault",       "config.events",
-    "config.runtime",      "config.credentials",
+    "config.runtime",      "config.credentials",  "config.anchors",
     "functional.corpus",   "functional.index",   "functional.replay",
     "retrieval.questions", "retrieval.recall",
     "daemon.supervisor",   "daemon.liveness",    "service.installed",
@@ -121,6 +121,34 @@ def _check_configuration(live: bool) -> list[Check]:
                         f"{detail} — distiller & judge disabled; retrieval "
                         "works without them", required=False,
                         id="config.credentials"))
+    # Anchor budget — are the always-on anchor files (soul/CLAUDE docs)
+    # fitting under preload_anchor_cap, or is the tail being silently
+    # truncated? Advisory: retrieval still works, but identity/rules text
+    # past the cap never reaches the model.
+    try:
+        from dct.retrieval.types import RetrievalConfig
+        cap = RetrievalConfig.__dataclass_fields__["preload_anchor_cap"].default
+        paths = [p for p in cfg.anchor_candidates() if p.exists()]
+        total = sum(len(p.read_text()) for p in paths) // 4  # char/4 estimator
+        pct = (total / cap * 100) if cap else 0.0
+        if not paths:
+            checks.append(Check("anchor budget", True,
+                                "no anchor files present", required=False,
+                                id="config.anchors"))
+        elif total > cap:
+            checks.append(Check("anchor budget", False,
+                                f"anchors ~{total} tokens exceed preload_anchor_cap={cap} "
+                                f"({pct:.0f}% — tail truncated; raise the cap or trim "
+                                f"{', '.join(p.name for p in paths)})",
+                                required=False, id="config.anchors"))
+        else:
+            checks.append(Check("anchor budget", True,
+                                f"~{total}/{cap} tokens ({pct:.0f}% of cap) across "
+                                f"{len(paths)} file(s)", required=False,
+                                id="config.anchors"))
+    except Exception as e:  # pragma: no cover — advisory check never blocks
+        checks.append(Check("anchor budget", True, f"skipped: {e}",
+                            required=False, id="config.anchors"))
     return checks
 
 
