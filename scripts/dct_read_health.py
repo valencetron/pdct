@@ -203,7 +203,14 @@ def scan_model_health(log_path: Path, window_min: int, now_unix: float) -> dict:
                              + int(line[6:8]))
                 except (ValueError, IndexError):
                     continue
-                if "Load pretrained SentenceTransformer" in line:
+                if " tool " in line and "args=[" in line:
+                    # Tool-call echo: the daemon logs every tool invocation's
+                    # args verbatim. A debugging session grepping for these
+                    # phrases WRITES them into this log — counting echoes
+                    # produced DEGRADED verdicts caused by investigating
+                    # DEGRADED verdicts (upgrade cycle #3, 2026-07-26).
+                    kind = None
+                elif "Load pretrained SentenceTransformer" in line:
                     kind = "constructions"
                 elif "meta tensor" in line:
                     kind = "meta_tensor"
