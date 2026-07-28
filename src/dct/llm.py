@@ -318,6 +318,42 @@ def _concept_extractor_via_urllib(text: str, model_id: str) -> list[str]:
         if p not in sys.path:
             sys.path.insert(0, p)
 
+    # Prefer the shared llm_runner: it forces the Claude Code preamble to
+    # system[0] (an OAuth call without it can return a *disguised*
+    # rate-limit error) and refreshes the token once on 401. It is OPTIONAL
+    # — this tree runs on hosts with no shared/ package and no claude CLI,
+    # so we fall back to the plain urllib path when it is unavailable.
+    try:
+        from shared import llm_runner as _lr
+    except Exception:  # noqa: BLE001 — optional dependency
+        _lr = None
+
+    if _lr is not None:
+        try:
+            body = _lr.call_messages(
+                model=model_id,
+                max_tokens=256,
+                system=_CONCEPT_EXTRACTOR_SYSTEM,
+                messages=[{"role": "user", "content": text[:4000]}],
+                timeout=3,
+                extra={
+                    "tools": [_CONCEPT_EXTRACTOR_TOOL],
+                    "tool_choice": {"type": "tool", "name": "emit_concepts"},
+                },
+            )
+        except _lr.LLMAuthError:
+            # FAIL LOUD: credentials are dead. Returning [] here would
+            # silently claim "this text contains no concepts" — the exact
+            # bug this build exists to kill.
+            raise
+        except _lr.LLMRateLimitError:
+            # Loud too: a rate limit with the preamble genuinely sent is
+            # real, not the disguised-auth variety.
+            raise
+        except Exception:  # noqa: BLE001 — transport/parse: heuristic fallback
+            return []
+        return _extract_concepts_from_body(body)
+
     try:
         from shared.oauth_client import api_headers
     except ImportError:
@@ -344,6 +380,11 @@ def _concept_extractor_via_urllib(text: str, model_id: str) -> list[str]:
     except (urllib.error.URLError, OSError, json.JSONDecodeError):
         return []
 
+    return _extract_concepts_from_body(body)
+
+
+def _extract_concepts_from_body(body: dict) -> list[str]:
+    """Pull the emit_concepts tool_use payload out of a /v1/messages body."""
     for block in body.get("content", []):
         if block.get("type") == "tool_use":
             items = (block.get("input") or {}).get("concepts")
