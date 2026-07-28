@@ -274,32 +274,71 @@ Respond ONLY with valid JSON (no markdown fences):
 
 
 async def _call_haiku(prompt: str) -> str:
-    """Call Haiku API, return raw text response."""
+    """Call Haiku API, return raw text response.
+
+    The OAuth branch sends the Claude Code preamble as system[0] via the
+    shared llm_runner (which also refreshes the token once on 401). An
+    OAuth /v1/messages call without that preamble can come back as a
+    *disguised* rate-limit error rather than an auth error.
+
+    llm_runner is optional here: this tree may run on hosts that have no
+    shared/ package and no `claude` CLI. When it is unavailable we fall
+    back to the plain SDK client rather than failing — no hard dependency
+    is introduced.
+    """
     import anthropic
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if api_key:
         client = anthropic.AsyncAnthropic(api_key=api_key)
+        msg = await client.messages.create(
+            model=_CLASSIFIER_MODEL,
+            max_tokens=256,
+            temperature=0.1,
+            messages=[{"role": "user", "content": prompt}],
+        )
     else:
+        import asyncio as _asyncio
+        import sys as _sys
+        _tools_dir = os.path.join(os.path.expanduser("~"), "example-stack", "tools")
+        if _tools_dir not in _sys.path:
+            _sys.path.insert(0, _tools_dir)
         try:
-            import sys as _sys
-            _tools_dir = os.path.join(os.path.expanduser("~"), "example-stack", "tools")
-            if _tools_dir not in _sys.path:
-                _sys.path.insert(0, _tools_dir)
-            from shared.oauth_client import oauth_token as _oauth_token
-            _tok = _oauth_token()
-            client = anthropic.AsyncAnthropic(auth_token=_tok)
-        except Exception as _auth_err:
-            raise RuntimeError(
-                f"ANTHROPIC_API_KEY not set and OAuth unavailable: {_auth_err}"
-            ) from _auth_err
+            from shared import llm_runner as _lr
+        except Exception:  # noqa: BLE001 — optional dependency
+            _lr = None
 
-    msg = await client.messages.create(
-        model=_CLASSIFIER_MODEL,
-        max_tokens=256,
-        temperature=0.1,
-        messages=[{"role": "user", "content": prompt}],
-    )
+        if _lr is not None:
+            body = await _asyncio.to_thread(
+                _lr.call_messages,
+                model=_CLASSIFIER_MODEL,
+                max_tokens=256,
+                messages=[{"role": "user", "content": prompt}],
+                extra={"temperature": 0.1},
+            )
+
+            class _Msg:  # duck-types the SDK response the caller walks
+                content = [
+                    type("_B", (), {"text": b.get("text", "")})()
+                    for b in body.get("content", [])
+                    if isinstance(b, dict)
+                ]
+            msg = _Msg()
+        else:
+            try:
+                from shared.oauth_client import oauth_token as _oauth_token
+                _tok = _oauth_token()
+                client = anthropic.AsyncAnthropic(auth_token=_tok)
+            except Exception as _auth_err:
+                raise RuntimeError(
+                    f"ANTHROPIC_API_KEY not set and OAuth unavailable: {_auth_err}"
+                ) from _auth_err
+            msg = await client.messages.create(
+                model=_CLASSIFIER_MODEL,
+                max_tokens=256,
+                temperature=0.1,
+                messages=[{"role": "user", "content": prompt}],
+            )
     for block in msg.content:
         if hasattr(block, "text"):
             return block.text
