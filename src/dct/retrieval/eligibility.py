@@ -62,6 +62,73 @@ def _looks_like_transcript(body: str) -> bool:
     return prose_density < _MIN_PROSE_DENSITY
 
 
+# --- curated-note thresholds (2026-07-26) --------------------------------
+# Notes are hand-written, so the distillation noise model does not apply: there
+# is no pre-summarizer dumping tool traces into people/Ayan.md. The failure mode
+# here is the opposite — a terse note carries REAL signal that the 400-char
+# distillation floor would silently discard. "Ayan's IEP meeting is May 5" is
+# three lines and is exactly what should be retrievable.
+#
+# So notes are gated on SIGNAL, not length: some prose or structured facts, plus
+# something to jog off. Empty stubs and unfilled templates still get dropped.
+_NOTE_MIN_CHARS = 24            # below this there is no sentence to return at all
+_NOTE_SCAN_HEAD_CHARS = 4000    # prose checks scan this much; see is_eligible_note
+_TEMPLATER_RE = re.compile(r"\{\{\s*(date|time|title|VALUE)[:\s}]")
+_NOTE_STUB_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?\((?:add|todo|tbd|fill|to be)\b[^)]*\)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def is_eligible_note(ref, body: str) -> tuple[bool, str]:
+    """Decide retrieval eligibility for one curated (hand-written) note.
+
+    Deliberately NOT length-gated — see the threshold comment above. Mirrors
+    is_eligible()'s (bool, reason) contract so build_index can swap gates per
+    corpus class.
+    """
+    stripped = (body or "").strip()
+
+    # 1. genuinely empty — nothing to retrieve.
+    if len(stripped) < _NOTE_MIN_CHARS:
+        return False, "note-empty"
+
+    # Scan only the HEAD of the body for the prose/structure checks below.
+    # _SENTENCE_RE's nested quantifier backtracks badly on long documents, and
+    # the vault holds 190KB-per-file book manuals: running these patterns over
+    # full bodies cost 31s across ~950 notes (measured 2026-07-27). A note's
+    # first few KB is more than enough to answer "does this contain prose",
+    # and the decision is monotonic — finding prose early is finding prose.
+    head = stripped[:_NOTE_SCAN_HEAD_CHARS]
+
+    # 2. unfilled Templater scaffolding ({{date:YYYY-MM-DD}} etc.).
+    if _TEMPLATER_RE.search(head):
+        return False, "note-template"
+
+    # 3. placeholder-only body ("- (Add as more context surfaces.)").
+    without_stubs = _NOTE_STUB_RE.sub("", head).strip()
+    if len(without_stubs) < _NOTE_MIN_CHARS and len(stripped) <= len(head):
+        return False, "note-stub"
+
+    # 4. nothing to jog off. Notes carry `tags:`, wikilinks, or a title rather
+    #    than `concepts:`; _ref_from_note_file() derives concepts from those, so
+    #    reaching here means even that found nothing.
+    if not getattr(ref, "concepts", None):
+        return False, "note-no-concepts"
+
+    # 5. needs SOME retrievable content: a real sentence, a populated
+    #    frontmatter-style fact line, or a prose list item. Length is not the test.
+    has_sentence = bool(_SENTENCE_RE.search(without_stubs))
+    has_list_prose = bool(re.search(r"^\s*[-*]\s+\S+(?:\s+\S+){2,}", without_stubs,
+                                    re.MULTILINE))
+    has_fact_line = bool(re.search(r"^\s*\*{0,2}[\w\s/'-]{2,30}\*{0,2}\s*:\s*\S+",
+                                   without_stubs, re.MULTILINE))
+    if not (has_sentence or has_list_prose or has_fact_line):
+        return False, "note-no-prose"
+
+    return True, ""
+
+
 def is_eligible(ref, body: str) -> tuple[bool, str]:
     """Decide retrieval eligibility for one distillation.
 

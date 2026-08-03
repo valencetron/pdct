@@ -303,13 +303,14 @@ def _concept_extractor_via_urllib(text: str, model_id: str) -> list[str]:
     Returns [] on any error so callers fall back to heuristic extraction.
     """
     import json
-    import urllib.request
-    import urllib.error
+    import logging
     import sys
     import os
 
-    # Locate shared oauth_client — try the canonical exampleco path first,
-    # then fall back to the daemon's working directory convention.
+    _log = logging.getLogger("dct.llm")
+
+    # Locate the shared exampleco modules — canonical path first, then the
+    # daemon's working-directory convention.
     _shared_paths = [
         os.path.expanduser("~/example-stack/tools"),
         os.path.expanduser("~/example-stack/tools/telegram-dispatch"),
@@ -318,84 +319,53 @@ def _concept_extractor_via_urllib(text: str, model_id: str) -> list[str]:
         if p not in sys.path:
             sys.path.insert(0, p)
 
-    # Prefer the shared llm_runner: it forces the Claude Code preamble to
-    # system[0] (an OAuth call without it can return a *disguised*
-    # rate-limit error) and refreshes the token once on 401. It is OPTIONAL
-    # — this tree runs on hosts with no shared/ package and no claude CLI,
-    # so we fall back to the plain urllib path when it is unavailable.
+    # Build 142: route through shared.llm_runner so this call carries the
+    # Claude Code preamble as system[0] and refreshes the OAuth token on a
+    # 401. Previously this hand-built the payload with a bare-string system
+    # (no preamble) and caught urllib.error.URLError — which HTTPError
+    # subclasses — so a 401/429 was swallowed and returned [] forever.
     try:
         from shared import llm_runner as _lr
-    except Exception:  # noqa: BLE001 — optional dependency
-        _lr = None
-
-    if _lr is not None:
-        try:
-            body = _lr.call_messages(
-                model=model_id,
-                max_tokens=256,
-                system=_CONCEPT_EXTRACTOR_SYSTEM,
-                messages=[{"role": "user", "content": text[:4000]}],
-                timeout=3,
-                extra={
-                    "tools": [_CONCEPT_EXTRACTOR_TOOL],
-                    "tool_choice": {"type": "tool", "name": "emit_concepts"},
-                },
-            )
-        except _lr.LLMAuthError:
-            # FAIL LOUD: credentials are dead. Returning [] here would
-            # silently claim "this text contains no concepts" — the exact
-            # bug this build exists to kill.
-            raise
-        except _lr.LLMRateLimitError:
-            # Loud too: a rate limit with the preamble genuinely sent is
-            # real, not the disguised-auth variety.
-            raise
-        except Exception:  # noqa: BLE001 — transport/parse: heuristic fallback
-            return []
-        return _extract_concepts_from_body(body)
-
-    try:
-        from shared.oauth_client import api_headers
     except ImportError:
         return []
 
-    payload = {
-        "model": model_id,
-        "max_tokens": 256,
-        "system": _CONCEPT_EXTRACTOR_SYSTEM,
-        "tools": [_CONCEPT_EXTRACTOR_TOOL],
-        "tool_choice": {"type": "tool", "name": "emit_concepts"},
-        "messages": [{"role": "user", "content": text[:4000]}],
-    }
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=data,
-        headers=api_headers(),
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            body = json.loads(resp.read())
-    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        body = _lr.call_messages(
+            model=model_id,
+            system=_CONCEPT_EXTRACTOR_SYSTEM,
+            messages=[{"role": "user", "content": text[:4000]}],
+            max_tokens=256,
+            timeout=10,
+            extra={
+                "tools": [_CONCEPT_EXTRACTOR_TOOL],
+                "tool_choice": {"type": "tool", "name": "emit_concepts"},
+            },
+        )
+    except _lr.LLMAuthError:
+        # FAIL LOUD: auth is broken; heuristic fallback would hide it.
+        _log.error("concept extractor: OAuth failed after refresh — "
+                   "run tools/telegram-dispatch/oauth_doctor.py")
+        raise
+    except _lr.LLMRateLimitError as exc:
+        _log.error("concept extractor: rate limited (preamble WAS sent): %s", exc)
+        raise
+    except _lr.LLMError as exc:
+        # Transient network/5xx: log at WARNING, then fall back to heuristics.
+        _log.warning("concept extractor: %s: %s", type(exc).__name__, exc)
+        return []
+    except json.JSONDecodeError:
+        _log.warning("concept extractor: unparseable response body")
         return []
 
-    return _extract_concepts_from_body(body)
-
-
-def _extract_concepts_from_body(body: dict) -> list[str]:
-    """Pull the emit_concepts tool_use payload out of a /v1/messages body."""
-    for block in body.get("content", []):
-        if block.get("type") == "tool_use":
-            items = (block.get("input") or {}).get("concepts")
-            if isinstance(items, list):
-                out: list[str] = []
-                for c in items:
-                    if isinstance(c, str):
-                        s = c.strip().lower().replace(" ", "-")
-                        if s and len(s) <= 60:
-                            out.append(s)
-                return out[:8]
+    items = (_lr.tool_input(body, "emit_concepts") or {}).get("concepts")
+    if isinstance(items, list):
+        out: list[str] = []
+        for c in items:
+            if isinstance(c, str):
+                s = c.strip().lower().replace(" ", "-")
+                if s and len(s) <= 60:
+                    out.append(s)
+        return out[:8]
     return []
 
 

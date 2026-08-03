@@ -43,7 +43,11 @@ def test_retrieval_config_defaults(tmp_path):
     assert cfg.cascade_token_cap == 10_000
     assert cfg.cascade_score_floor == 0.05
     assert cfg.cascade_top_k == 80
-    assert cfg.preload_anchor_cap == 5_000
+    # 5_000 -> 32_000 (2026-07-27 SOUL.md truncation incident, commit 2769ee8).
+    # pdct-public keeps 5_000 — this assertion intentionally diverges.
+    assert cfg.preload_anchor_cap == 32_000
+    assert cfg.anchor_structure_aware is True
+    assert cfg.anchor_tier_order == ("inviolable", "core", "journal")
     assert cfg.preload_today_cap == 5_000
     assert cfg.preload_surface_cap == 5_000
     assert cfg.preload_last_n == 10  # bumped from 3 (2026-05-27, distill loader fix)

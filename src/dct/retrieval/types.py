@@ -38,6 +38,10 @@ class PreloadBundle:
     today_summaries: str
     recent_summaries: dict[str, str]
     total_tokens: int
+    # Structure-aware anchor loading (2026-07-27 spec): how much anchor
+    # content was dropped to fit preload_anchor_cap. 0/0 = full soul loaded.
+    anchors_dropped_sections: int = 0
+    anchors_dropped_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -81,7 +85,22 @@ class RetrievalConfig:
     # PDCT v2 P1.1 — junk-concept blocklist
     # (Codex review #1: contract; Codex review #2: conditional wording).
     cascade_eligibility_filter_enabled: bool = True
-    preload_anchor_cap: int = 5_000
+    preload_anchor_cap: int = 32_000
+    # Structure-aware anchor loading (2026-07-27 spec). When anchors exceed
+    # preload_anchor_cap, drop whole sections least-important-tier-first
+    # (journal -> core -> inviolable) instead of head-chopping mid-sentence.
+    # Under-cap output is byte-identical to legacy, so prompt caching is
+    # unaffected for deployments that fit. False = legacy head-chop.
+    anchor_structure_aware: bool = True
+    # Heading substrings (case-insensitive) that force a tier; [tier:x] tags
+    # in headings always win. Date-suffixed headings "(YYYY-MM-DD…)" are
+    # classified journal by heuristic.
+    anchor_tier_markers: dict[str, tuple[str, ...]] = field(
+        default_factory=lambda: {
+            "inviolable": ("inviolable", "red line", "kill-switch"),
+        })
+    # Most-important-first; drop order is the reverse.
+    anchor_tier_order: tuple[str, ...] = ("inviolable", "core", "journal")
     preload_today_cap: int = 5_000
     preload_surface_cap: int = 5_000
     preload_last_n: int = 10

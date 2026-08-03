@@ -114,6 +114,44 @@ def vault_roots() -> list[Path]:
     ]
 
 
+def notes_roots() -> list[Path]:
+    """Curated-note roots — hand-written vault notes, NOT machine distillations.
+
+    Notes are a distinct corpus class: written by a human, often deliberately
+    terse, carrying `tags:` rather than `concepts:`. Before 2026-07-26 they were
+    never retrievable at all (build_index walked only the distillation roots),
+    so a fleshed-out people/ note could never be returned no matter how good it
+    was. See notes_exclude_roots() for the subtrees kept out.
+    """
+    for var in ("PDCT_NOTES_ROOT", "PDCT_VAULT_ROOT", "OBSIDIAN_VAULT"):
+        p = _env_path(var)
+        if p is not None:
+            return [p]
+    if _env_path("PDCT_HOME") is not None:
+        return [pdct_home() / "vault"]
+    return [Path.home() / "example-stack" / "vault"]
+
+
+def notes_exclude_roots() -> list[Path]:
+    """Subtrees excluded from the notes corpus.
+
+    Distillation dirs are excluded so the same file is never indexed twice
+    (once as a distillation, once as a note). Archive/compaction are historical.
+    Templates are Templater scaffolding, not content.
+    """
+    out: list[Path] = []
+    for root in notes_roots():
+        out += [
+            root / "distillations",
+            root / "dct-distillations",
+            root / "compaction-archive",
+            root / "archive",
+            root / "templates",
+            root / "backups",
+        ]
+    return out
+
+
 def archive_root() -> Path:
     p = _env_path("PDCT_ARCHIVE_ROOT")
     if p is not None:

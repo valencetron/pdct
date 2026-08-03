@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import sys
@@ -301,7 +302,20 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=63)
     ap.add_argument("--retrieval-only", action="store_true",
                     help="no LLM: only measure gold-doc recall@5 (fast arm)")
+    ap.add_argument("--include-notes", action="store_true",
+                    help="add hand-written vault notes to the corpus. OFF by "
+                         "default so runs stay comparable with every benchmark "
+                         "before 2026-07-27, when the corpus was distillations "
+                         "only. Live retrieval defaults notes ON — so a run "
+                         "WITHOUT this flag does not reflect production.")
     args = ap.parse_args()
+
+    # Pin the corpus explicitly rather than inheriting the live default. Notes
+    # became retrievable 2026-07-27 (+943 refs); silently folding them into an
+    # eval run would move published numbers with no record of why.
+    os.environ["PDCT_INCLUDE_NOTES"] = "1" if args.include_notes else "0"
+    print(f"[eval_v3] corpus: notes={'ON' if args.include_notes else 'OFF'} "
+          f"(PDCT_INCLUDE_NOTES={os.environ['PDCT_INCLUDE_NOTES']})")
 
     qs = json.load(open(ASSET))["questions"]
     if args.smoke:

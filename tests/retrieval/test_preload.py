@@ -29,10 +29,11 @@ def test_estimate_tokens_char_quarter():
 
 
 def test_load_anchors_concatenates(config: RetrievalConfig):
-    text, tokens = _load_anchors(config)
+    text, tokens, dropped, dropped_tok = _load_anchors(config)
     assert "Static anchor A" in text
     assert "Static anchor B" in text
     assert tokens > 0
+    assert dropped == 0 and dropped_tok == 0
 
 
 def test_load_anchors_respects_token_cap(config: RetrievalConfig, anchor_dir: Path):
@@ -43,8 +44,45 @@ def test_load_anchors_respects_token_cap(config: RetrievalConfig, anchor_dir: Pa
         surfaces=config.surfaces,
         preload_anchor_cap=100,
     )
-    text, tokens = _load_anchors(capped)
+    text, tokens, _, _ = _load_anchors(capped)
     assert tokens <= 100
+
+
+def test_load_anchors_legacy_head_chop(config: RetrievalConfig, anchor_dir: Path):
+    (anchor_dir / "CLAUDE.md").write_text("X" * 40_000)
+    capped = RetrievalConfig(
+        anchor_paths=config.anchor_paths,
+        distill_root=config.distill_root,
+        surfaces=config.surfaces,
+        preload_anchor_cap=100,
+        anchor_structure_aware=False,
+    )
+    text, tokens, dropped, dropped_tok = _load_anchors(capped)
+    assert tokens <= 100
+    assert dropped == 0 and dropped_tok == 0  # legacy mode doesn't count
+
+
+def test_load_anchors_structure_aware_drops_journal_first(
+        config: RetrievalConfig, anchor_dir: Path):
+    (anchor_dir / "CLAUDE.md").write_text(
+        "# Rules\n\n## Inviolable Rule: never lie\nAlways true. " + "R" * 400 + "\n"
+    )
+    (anchor_dir / "soul.md").write_text(
+        "# Soul\nCore identity. " + "C" * 400 + "\n"
+        "## Journal entry (2026-07-01)\n" + "J" * 4000 + "\n"
+    )
+    capped = RetrievalConfig(
+        anchor_paths=config.anchor_paths,
+        distill_root=config.distill_root,
+        surfaces=config.surfaces,
+        preload_anchor_cap=400,
+    )
+    text, tokens, dropped, dropped_tok = _load_anchors(capped)
+    assert "Inviolable Rule: never lie" in text
+    assert "Core identity." in text
+    assert "JJJJ" not in text          # journal dropped, whole-section
+    assert dropped == 1 and dropped_tok > 0
+    assert "section(s) dropped" in text  # loud, not silent
 
 
 # -- distilled loader ---------------------------------------------------------

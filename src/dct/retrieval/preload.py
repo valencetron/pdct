@@ -1,5 +1,6 @@
 """Preload — assemble session-start context bundle."""
 from __future__ import annotations
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from pathlib import Path
 import yaml
 
 from .types import RetrievalConfig, PreloadBundle
+
+_log = logging.getLogger(__name__)
 
 
 # -- token estimator -----------------------------------------------------------
@@ -30,16 +33,55 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
 
 # -- anchor loader -------------------------------------------------------------
 
-def _load_anchors(config: RetrievalConfig) -> tuple[str, int]:
-    """Read + concat anchor files, respecting token cap. Missing files are skipped."""
+def _load_anchors(config: RetrievalConfig) -> tuple[str, int, int, int]:
+    """Read + concat anchor files, respecting token cap. Missing files skipped.
+
+    Returns (text, tokens, dropped_sections, dropped_tokens).
+
+    Structure-aware mode (default, 2026-07-27 spec): when the combined
+    anchors exceed preload_anchor_cap, whole sections are dropped
+    least-important-tier-first (journal -> core -> inviolable) and a
+    truncation notice is appended. Under-cap output is byte-identical to
+    the legacy path, preserving prompt-cache stability. Legacy mode
+    (anchor_structure_aware=False) is the old blind head-chop.
+    """
     parts: list[str] = []
     for path in config.anchor_paths:
         if not path.exists():
             continue
         parts.append(path.read_text())
     combined = "\n\n".join(parts)
-    capped = _truncate_to_tokens(combined, config.preload_anchor_cap)
-    return capped, _estimate_tokens(capped)
+    cap = config.preload_anchor_cap
+
+    if _estimate_tokens(combined) <= cap:
+        return combined, _estimate_tokens(combined), 0, 0
+
+    if not getattr(config, "anchor_structure_aware", True):
+        capped = _truncate_to_tokens(combined, cap)
+        return capped, _estimate_tokens(capped), 0, 0
+
+    from .anchor_sections import assemble_anchor_block, parse_sections
+    sections = parse_sections(
+        combined,
+        markers=getattr(config, "anchor_tier_markers", None),
+    )
+    text, dropped = assemble_anchor_block(
+        sections, cap,
+        tier_order=getattr(config, "anchor_tier_order",
+                           ("inviolable", "core", "journal")),
+    )
+    if dropped:
+        by_tier: dict[str, int] = {}
+        for s in dropped:
+            by_tier[s.tier] = by_tier.get(s.tier, 0) + 1
+        _log.info(
+            "anchors: kept %d/%d sections, dropped %d (%s), ~%d/%d tokens",
+            len(sections) - len(dropped), len(sections), len(dropped),
+            ", ".join(f"{n} {t}" for t, n in sorted(by_tier.items())),
+            _estimate_tokens(text), cap,
+        )
+    drop_tokens = sum(s.tokens for s in dropped)
+    return text, _estimate_tokens(text), len(dropped), drop_tokens
 
 
 # -- distilled loader ----------------------------------------------------------
@@ -173,7 +215,43 @@ def _load_all_distilled(config: RetrievalConfig) -> list[DistilledNote]:
         if same_key and _NOTE_SCANNING["active"]:
             # A scan is in flight — serve stale rather than queue behind it.
             return _NOTE_LIST["notes"]
+        have_warm_list = bool(same_key and _NOTE_LIST["notes"])
         _NOTE_SCANNING["active"] = True
+
+    # Stale-while-revalidate (2026-07-27 latency campaign). The TTL-expiring
+    # caller used to run _scan_notes() INLINE, so ~one turn per 15s window ate a
+    # full stat-walk of distill_root + archives — 5.7k files here, measured as
+    # the preload p90 spike of 2-3.5s inside the cascade. Concurrent callers
+    # already served stale; only the unlucky one blocked. Now it serves stale
+    # too and refreshes in the background, exactly like the graph's
+    # _kick_background_rebuild. Staleness grows from <=15s to <=15s + scan
+    # duration, which "today/recent" session context tolerates. Content and
+    # ordering are untouched — this changes WHEN the scan runs, never its result.
+    if have_warm_list:
+        def _refresh() -> None:
+            try:
+                notes = _scan_notes(config)
+                with _NOTE_LOCK:
+                    _NOTE_LIST["checked_mono"] = time.monotonic()
+                    _NOTE_LIST["fast_key"] = fast_key
+                    _NOTE_LIST["notes"] = notes
+            except Exception as e:  # never let a scan crash take the turn
+                _plog.warning("[preload] background note scan failed: %s", e)
+                # Re-arm promptly so a transient failure doesn't freeze the list
+                # for a full TTL with no retry.
+                with _NOTE_LOCK:
+                    _NOTE_LIST["checked_mono"] = time.monotonic() - _NOTE_SCAN_TTL_S
+            finally:
+                with _NOTE_LOCK:
+                    _NOTE_SCANNING["active"] = False
+
+        threading.Thread(target=_refresh, name="dct-preload-note-scan",
+                         daemon=True).start()
+        with _NOTE_LOCK:
+            return _NOTE_LIST["notes"]
+
+    # Cold start (no warm list yet) — must scan synchronously or the first
+    # turn after boot has no preload context at all.
     try:
         notes = _scan_notes(config)
         with _NOTE_LOCK:
@@ -247,7 +325,7 @@ def preload(config: RetrievalConfig, *, now: float) -> PreloadBundle:
     - recent_summaries: per-surface distilled notes before today, up to last_n,
       each surface independently capped at preload_surface_cap
     """
-    anchors, anchor_tokens = _load_anchors(config)
+    anchors, anchor_tokens, anchors_dropped, anchors_dropped_tok = _load_anchors(config)
     today_notes, recent_by_surface = _split_today_and_recent(config, now=now)
 
     today_text = "\n\n---\n\n".join(_render_note(n) for n in today_notes)
@@ -271,4 +349,6 @@ def preload(config: RetrievalConfig, *, now: float) -> PreloadBundle:
         today_summaries=today_text,
         recent_summaries=recent_summaries,
         total_tokens=total_tokens,
+        anchors_dropped_sections=anchors_dropped,
+        anchors_dropped_tokens=anchors_dropped_tok,
     )

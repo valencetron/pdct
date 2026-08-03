@@ -136,10 +136,26 @@ def _check_configuration(live: bool) -> list[Check]:
                                 "no anchor files present", required=False,
                                 id="config.anchors"))
         elif total > cap:
-            checks.append(Check("anchor budget", False,
+            # Structure-aware loading (2026-07-27 spec): report exactly what
+            # would drop, per tier. Journal drops are advisory (pass); any
+            # inviolable/core drop is a WARN (fail, still non-required).
+            from dct.retrieval.anchor_sections import (
+                assemble_anchor_block, parse_sections)
+            combined = "\n\n".join(p.read_text() for p in paths)
+            _, dropped = assemble_anchor_block(parse_sections(combined), cap)
+            by_tier: dict[str, int] = {}
+            for s in dropped:
+                by_tier[s.tier] = by_tier.get(s.tier, 0) + 1
+            detail = ", ".join(f"{n} {t}" for t, n in sorted(by_tier.items()))
+            serious = by_tier.get("inviolable", 0) + by_tier.get("core", 0)
+            checks.append(Check("anchor budget", serious == 0,
                                 f"anchors ~{total} tokens exceed preload_anchor_cap={cap} "
-                                f"({pct:.0f}% — tail truncated; raise the cap or trim "
-                                f"{', '.join(p.name for p in paths)})",
+                                f"({pct:.0f}%) — dropping {len(dropped)} section(s) "
+                                f"({detail or 'none'}) from "
+                                f"{', '.join(p.name for p in paths)}"
+                                + ("" if serious == 0 else
+                                   " — INVIOLABLE/CORE content is being dropped; "
+                                   "raise the cap or trim"),
                                 required=False, id="config.anchors"))
         else:
             checks.append(Check("anchor budget", True,

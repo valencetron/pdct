@@ -238,8 +238,28 @@ _CACHE_WRITE_LOCK = threading.Lock()
 # Vault-mtime scan is ~1,900 stat() calls and ran on EVERY graph lookup —
 # even cache hits paid it. A 15s TTL delays cache invalidation by at most
 # 15s, well inside stale-while-revalidate tolerance (2026-07-16).
+#
+# Raised 15s -> 180s (2026-07-27 latency audit). This value only decides how
+# promptly a background graph rebuild is *considered* — the stale graph keeps
+# serving either way, so it never changes graph content or ranking. At 15s the
+# TTL rarely held (conversational turn gaps usually exceed it), so ~67% of turns
+# paid the full rglob+stat scan: the measured 250-350ms "graph" cluster.
+# Env-tunable so the sweep/tuner can adjust without a code edit.
 _VAULT_MTIME_CACHE = {"checked": 0.0, "val": 0.0}
-_VAULT_MTIME_TTL_S = 15.0
+
+
+def _parse_vault_mtime_ttl(raw) -> float:
+    """Reject NaN/inf/negative (which would disable the cache or freeze it
+    forever) -> 180s default. 0 is honoured as an explicit 'always rescan'."""
+    try:
+        v = float(raw) if raw is not None else 180.0
+    except (TypeError, ValueError):
+        return 180.0
+    return v if 0.0 <= v < float("inf") else 180.0
+
+
+_VAULT_MTIME_TTL_S = _parse_vault_mtime_ttl(
+    os.environ.get("DCT_VAULT_MTIME_TTL_S"))
 
 
 def _vault_mtime_cached() -> float:
@@ -851,7 +871,13 @@ def run(
                 _seen_s[_s] = None
         seed_concepts = list(_seen_s.keys())
     else:
+        # Timed: this scans every graph concept node (~31.8k) per turn and was
+        # the whole un-instrumented gap between the named stages — total ran
+        # ~125-160ms above the sum of stage_ms with nothing accounting for it
+        # (2026-07-27 audit).
+        _t_seeds = time.time()
         seed_concepts = _derive_seeds(user_text, graph)
+        _stage_ms["seeds"] = int((time.time() - _t_seeds) * 1000)
 
     _t_stage = time.time()
     bundle = preload(config, now=ts)
